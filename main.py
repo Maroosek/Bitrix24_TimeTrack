@@ -1,4 +1,6 @@
 import os
+import sys
+import json
 import re
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -18,6 +20,25 @@ STATUS_MAP = {
 }
 
 
+def get_data_dir():
+    """Wykrywa ścieżkę programu (nawet po kompilacji do .exe) i tworzy foldery na dane."""
+    if getattr(sys, 'frozen', False):
+        # Jeśli program to skompilowany plik .exe
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # Jeśli program to zwykły skrypt .py
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    data_dir = os.path.join(base_dir, "bitrix_data")
+
+    # Tworzenie struktury folderów, jeśli nie istnieją
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(os.path.join(data_dir, "details"), exist_ok=True)
+    os.makedirs(os.path.join(data_dir, "chats"), exist_ok=True)
+
+    return data_dir
+
+
 def seconds_to_readable(seconds):
     try:
         seconds = int(seconds)
@@ -34,11 +55,9 @@ def format_date(date_string):
         return ""
     try:
         dt = datetime.fromisoformat(date_string)
-
         if dt.tzinfo is not None:
             target_tz = timezone(timedelta(hours=1))
             dt = dt.astimezone(target_tz)
-
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
         try:
@@ -53,6 +72,7 @@ class BitrixApp:
         self.root.title("Bitrix Task Viewer")
         self.root.geometry("1450x700")
 
+        self.data_dir = get_data_dir()
         self.all_fetched_tasks = []
         self.all_responsibles = ["Wszyscy"]
 
@@ -62,6 +82,9 @@ class BitrixApp:
 
         self.create_widgets()
 
+        # Próba wczytania lokalnych danych natychmiast po uruchomieniu programu
+        self.load_local_tasks()
+
     def create_widgets(self):
         frame_top = tk.Frame(self.root)
         frame_top.pack(pady=10, fill="x", padx=10)
@@ -69,7 +92,8 @@ class BitrixApp:
         btn_frame = tk.Frame(frame_top)
         btn_frame.pack(side="left")
 
-        tk.Button(btn_frame, text="Pobierz dane", command=self.fetch_data, width=15, bg="#4CAF50", fg="white").grid(
+        tk.Button(btn_frame, text="Pobierz / Odśwież dane", command=self.fetch_data, width=20, bg="#4CAF50",
+                  fg="white").grid(
             row=0, column=0, padx=5)
         tk.Button(btn_frame, text="Otwórz zadanie", command=self.open_task, width=15, bg="#2196F3", fg="white").grid(
             row=0, column=1, padx=5)
@@ -91,7 +115,6 @@ class BitrixApp:
         self.resp_combobox.bind("<<ComboboxSelected>>", self.apply_filter)
         self.resp_combobox.bind("<KeyRelease>", self.on_resp_type)
 
-        # NOWE: Wyszukiwarka po nazwie zadania
         tk.Label(filter_frame, text="Szukaj (tytuł):").grid(row=0, column=4, padx=(15, 2))
         self.search_entry = tk.Entry(filter_frame, textvariable=self.search_var, width=25)
         self.search_entry.grid(row=0, column=5, padx=2)
@@ -118,9 +141,20 @@ class BitrixApp:
 
         self.tree.pack(side="left", fill="both", expand=True)
 
+    def load_local_tasks(self):
+        """Wczytuje listę zadań z dysku, jeśli istnieje, aby program uruchamiał się błyskawicznie."""
+        file_path = os.path.join(self.data_dir, "tasks_list.json")
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    self.all_fetched_tasks = json.load(f)
+                self.update_resp_filter_options()
+                self.apply_filter()
+            except Exception as e:
+                print(f"Nie udało się wczytać lokalnego cache: {e}")
+
     def sort_treeview(self, col, reverse):
         data = [(self.tree.set(child, col), child) for child in self.tree.get_children("")]
-
         try:
             data.sort(key=lambda t: float(t[0]) if t[0] else 0.0, reverse=reverse)
         except ValueError:
@@ -138,7 +172,7 @@ class BitrixApp:
 
         try:
             while True:
-                response = requests.get(f"{full_url}?start={start}")
+                response = requests.get(f"{full_url}?start={start}", timeout=10)
                 response.raise_for_status()
                 data = response.json()
 
@@ -157,8 +191,16 @@ class BitrixApp:
             self.update_resp_filter_options()
             self.apply_filter()
 
-        except Exception as e:
-            messagebox.showerror("Błąd", f"Nie udało się pobrać danych:\n{str(e)}")
+            # Po pomyślnym pobraniu zapisz dane lokalnie
+            file_path = os.path.join(self.data_dir, "tasks_list.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(all_tasks, f, ensure_ascii=False, indent=4)
+
+            messagebox.showinfo("Sukces", "Pobrano i zapisano najnowsze dane.")
+
+        except requests.exceptions.RequestException as e:
+            messagebox.showwarning("Tryb Offline",
+                                   f"Nie udało się połączyć z serwerem. Przeglądasz dane zapisane lokalnie.\nSzczegóły błędu: {e}")
 
     def update_resp_filter_options(self):
         responsibles = set()
@@ -174,7 +216,6 @@ class BitrixApp:
     def on_resp_type(self, event):
         if event.keysym in ("Up", "Down", "Left", "Right", "Return", "Tab"):
             return
-
         typed_text = self.current_resp_filter.get().lower()
 
         if not typed_text:
@@ -182,7 +223,6 @@ class BitrixApp:
         else:
             suggestions = [name for name in self.all_responsibles if typed_text in name.lower()]
             self.resp_combobox.config(values=suggestions)
-
         self.apply_filter()
 
     def apply_filter(self, event=None):
@@ -242,27 +282,57 @@ class BitrixApp:
         item_values = self.tree.item(selected_item[0], "values")
         task_id = item_values[0]
 
+        # Ścieżki zapisu lokalnego
+        task_file_path = os.path.join(self.data_dir, "details", f"task_{task_id}.json")
+        chat_id = None
+        task_data = {}
+        messages = []
+
         try:
-            task_resp = requests.get(f"{WEBHOOK_URL}tasks.task.get?taskId={task_id}")
+            # 1. Próba pobrania zadania z API
+            task_resp = requests.get(f"{WEBHOOK_URL}tasks.task.get?taskId={task_id}", timeout=5)
             task_resp.raise_for_status()
             task_data = task_resp.json().get("result", {}).get("task", {})
 
-            if not task_data:
-                messagebox.showerror("Błąd", "Nie znaleziono szczegółów zadania.")
-                return
+            if task_data:
+                # Zapis lokalny szczegółów zadania
+                with open(task_file_path, "w", encoding="utf-8") as f:
+                    json.dump(task_data, f, ensure_ascii=False, indent=4)
 
             chat_id = task_data.get("chatId") or task_data.get("CHAT_ID")
-            messages = []
 
+            # 2. Próba pobrania czatu z API
             if chat_id:
-                chat_resp = requests.get(f"{WEBHOOK_URL}im.dialog.messages.get?DIALOG_ID=chat{chat_id}")
+                chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json")
+                chat_resp = requests.get(f"{WEBHOOK_URL}im.dialog.messages.get?DIALOG_ID=chat{chat_id}", timeout=5)
                 chat_resp.raise_for_status()
                 messages = chat_resp.json().get("result", {}).get("messages", [])
 
-            self.show_task_details_window(task_data, messages, chat_id)
+                # Zapis lokalny czatu
+                with open(chat_file_path, "w", encoding="utf-8") as f:
+                    json.dump(messages, f, ensure_ascii=False, indent=4)
 
-        except Exception as e:
-            messagebox.showerror("Błąd API", f"Nie udało się otworzyć zadania:\n{str(e)}")
+        except requests.exceptions.RequestException:
+            # TRYB OFFLINE: Jeśli nie ma połączenia, załaduj pliki lokalne
+            if os.path.exists(task_file_path):
+                with open(task_file_path, "r", encoding="utf-8") as f:
+                    task_data = json.load(f)
+                chat_id = task_data.get("chatId") or task_data.get("CHAT_ID")
+            else:
+                messagebox.showerror("Błąd", "Nie masz internetu, a to zadanie nie zostało jeszcze pobrane lokalnie.")
+                return
+
+            if chat_id:
+                chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json")
+                if os.path.exists(chat_file_path):
+                    with open(chat_file_path, "r", encoding="utf-8") as f:
+                        messages = json.load(f)
+
+        if not task_data:
+            messagebox.showerror("Błąd", "Nie znaleziono szczegółów zadania.")
+            return
+
+        self.show_task_details_window(task_data, messages, chat_id)
 
     def show_task_details_window(self, task_data, messages, chat_id):
         top = tk.Toplevel(self.root)
@@ -322,11 +392,9 @@ class BitrixApp:
                     tracker[user]["total"] += max(0, elapsed)
                 tracker[user]["start_dt"] = None
 
-        # Zmienne dla całkowitego czasu
         total_base_seconds = 0
         active_timers = {}
 
-        # Etykieta łącznego czasu (umieszczona na górze ramki)
         total_time_var = tk.StringVar()
         total_time_lbl = tk.Label(time_frame, textvariable=total_time_var, font=("Arial", 11, "bold"), fg="#2c3e50")
         total_time_lbl.pack(anchor="w", pady=(0, 10))
@@ -400,7 +468,6 @@ class BitrixApp:
             total_current = data["total"] + live_elapsed
             data["var"].set(f"👤 {user}: {seconds_to_readable(total_current)} (W trakcie...)")
 
-        # Aktualizacja etykiety łącznego czasu na zadanie
         base_readable = seconds_to_readable(total_base_seconds)
         if live_total_elapsed > 0:
             live_readable = seconds_to_readable(live_total_elapsed)
