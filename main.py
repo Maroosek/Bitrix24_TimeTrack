@@ -4,6 +4,7 @@ import json
 import re
 import tkinter as tk
 from tkinter import ttk, messagebox
+import tkinter.font as tkfont  # Dodany moduł do mierzenia szerokości tekstu
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -77,16 +78,16 @@ class BitrixApp:
         self.current_filter = tk.StringVar(value="Wszystkie")
         self.current_resp_filter = tk.StringVar(value="Wszyscy")
         self.search_var = tk.StringVar()
+        self.activity_date_var = tk.StringVar()
 
         self.task_columns = (
             "ID", "TITLE", "REAL_STATUS", "STATUS", "TIME_SPENT",
             "CREATED_BY", "RESPONSIBLE", "DEADLINE", "CREATED_DATE",
-            "CHANGED_DATE", "STATUS_CHANGED_DATE", "GROUP_ID"
+            "CHANGED_DATE", "STATUS_CHANGED_DATE", "ACTIVITY_DATE", "GROUP_ID"
         )
         self.group_columns = ("ID", "NAME", "DESCRIPTION", "OWNER_ID", "DATE_CREATE")
 
         self.create_widgets()
-
         self.load_local_data()
 
     def create_widgets(self):
@@ -136,20 +137,57 @@ class BitrixApp:
         self.search_entry.grid(row=0, column=5, padx=2)
         self.search_entry.bind("<KeyRelease>", self.apply_filter)
 
+        tk.Label(self.filter_frame, text="Aktywność (od YYYY-MM-DD):").grid(row=0, column=6, padx=(15, 2))
+        self.activity_date_entry = tk.Entry(self.filter_frame, textvariable=self.activity_date_var, width=15)
+        self.activity_date_entry.grid(row=0, column=7, padx=2)
+        self.activity_date_entry.bind("<KeyRelease>", self.apply_filter)
+
         tree_frame = tk.Frame(self.root)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
         tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical")
         tree_scroll.pack(side="right", fill="y")
 
-        self.tree = ttk.Treeview(tree_frame, columns=self.task_columns, show="headings", yscrollcommand=tree_scroll.set)
+        # Oś X do przesuwania szerokich tabel
+        tree_scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal")
+        tree_scroll_x.pack(side="bottom", fill="x")
+
+        self.tree = ttk.Treeview(tree_frame, columns=self.task_columns, show="headings",
+                                 yscrollcommand=tree_scroll.set, xscrollcommand=tree_scroll_x.set)
+
         tree_scroll.config(command=self.tree.yview)
+        tree_scroll_x.config(command=self.tree.xview)
 
         for col in self.task_columns:
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_treeview(_col, False))
-            self.tree.column(col, width=110)
+            self.tree.column(col, width=100)  # Szerokość tymczasowa przed auto-fit
 
         self.tree.pack(side="left", fill="both", expand=True)
+
+    def auto_fit_columns(self):
+        """Mierzy zawartość każdej kolumny i dynamicznie dopasowuje jej szerokość."""
+        font = tkfont.nametofont("TkDefaultFont")
+        columns = self.tree["columns"]
+
+        for col in columns:
+            # Szerokość samego nagłówka kolumny
+            max_width = font.measure(col) + 30
+
+            # Przeszukujemy wiersze dla danej kolumny
+            for item in self.tree.get_children():
+                val = self.tree.set(item, col)
+                if val:
+                    val_width = font.measure(str(val)) + 30
+                    if val_width > max_width:
+                        max_width = val_width
+
+            # Limity zapobiegające "rozsadzeniu" tabeli przez np. opisy na 2000 znaków
+            if col in ["TITLE", "NAME", "DESCRIPTION"]:
+                max_width = min(max_width, 500)  # Szerszy limit dla głównych kolumn
+                self.tree.column(col, width=max_width, minwidth=max_width, stretch=True)
+            else:
+                max_width = min(max_width, 250)  # Standardowy limit
+                self.tree.column(col, width=max_width, minwidth=max_width, stretch=False)
 
     def switch_view(self):
         mode = self.current_view.get()
@@ -165,7 +203,6 @@ class BitrixApp:
             self.tree.config(columns=self.task_columns)
             for col in self.task_columns:
                 self.tree.heading(col, text=col, command=lambda _col=col: self.sort_treeview(_col, False))
-                self.tree.column(col, width=110)
 
             self.apply_filter()
 
@@ -177,8 +214,6 @@ class BitrixApp:
             self.tree.config(columns=self.group_columns)
             for col in self.group_columns:
                 self.tree.heading(col, text=col, command=lambda _col=col: self.sort_treeview(_col, False))
-                width = 300 if col == "NAME" else 150
-                self.tree.column(col, width=width)
 
             self.display_groups(self.all_fetched_groups)
 
@@ -204,10 +239,19 @@ class BitrixApp:
 
     def sort_treeview(self, col, reverse):
         data = [(self.tree.set(child, col), child) for child in self.tree.get_children("")]
-        try:
-            data.sort(key=lambda t: float(t[0]) if t[0] else 0.0, reverse=reverse)
-        except ValueError:
-            data.sort(key=lambda t: t[0].lower(), reverse=reverse)
+
+        def custom_sort(item):
+            val = item[0]
+            if not val:
+                return (4 if reverse else 0, "")
+            if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", val):
+                return (1, val)
+            try:
+                return (2, float(val))
+            except ValueError:
+                return (3, val.lower())
+
+        data.sort(key=custom_sort, reverse=reverse)
 
         for index, (_, child) in enumerate(data):
             self.tree.move(child, "", index)
@@ -270,6 +314,9 @@ class BitrixApp:
                 group.get("OWNER_ID"),
                 format_date(group.get("DATE_CREATE"))
             ))
+
+        # Dopasowanie kolumn po wczytaniu grup
+        self.auto_fit_columns()
 
     def handle_main_action(self):
         mode = self.current_view.get()
@@ -395,6 +442,7 @@ class BitrixApp:
         selected_status = self.current_filter.get()
         typed_resp = self.current_resp_filter.get().strip().lower()
         search_term = self.search_var.get().strip().lower()
+        filter_date = self.activity_date_var.get().strip()  # Pobranie daty do filtra
 
         filtered_tasks = []
         for task in self.all_fetched_tasks:
@@ -408,6 +456,10 @@ class BitrixApp:
 
             task_title = (task.get("TITLE") or task.get("title", "")).lower()
 
+            # Formatowanie daty aktywności do porównania
+            activity_date_raw = task.get("ACTIVITY_DATE") or task.get("activityDate") or ""
+            activity_date_str = format_date(activity_date_raw)
+
             match_status = (selected_status == "Wszystkie" or mapped_status == selected_status)
             match_title = (not search_term) or (search_term in task_title)
 
@@ -416,7 +468,12 @@ class BitrixApp:
             else:
                 match_resp = typed_resp in resp_name.lower()
 
-            if match_status and match_resp and match_title:
+            # Porównanie dat - wyświetla starsze/równe temu co w filtrze
+            match_activity = True
+            if filter_date and len(filter_date) >= 4:
+                match_activity = activity_date_str >= filter_date
+
+            if match_status and match_resp and match_title and match_activity:
                 filtered_tasks.append(task)
 
         self.display_data(filtered_tasks)
@@ -451,10 +508,19 @@ class BitrixApp:
             status_changed = format_date(task.get("STATUS_CHANGED_DATE") or task.get("statusChangedDate"))
             g_id = task.get("GROUP_ID") or task.get("groupId")
 
+            # NOWE: Pobranie i sformatowanie daty aktywności
+            activity_date = format_date(task.get("ACTIVITY_DATE") or task.get("activityDate"))
+
             self.tree.insert("", "end", values=(
                 t_id, title, real_status_text, status_text, time_spent,
-                c_by, resp, deadline, created, changed, status_changed, g_id
+                c_by, resp, deadline, created, changed, status_changed, activity_date, g_id
             ))
+
+        # Zmiana sortowania na domyślne po ACTIVITY_DATE (zamiast STATUS_CHANGED_DATE)
+        if self.current_view.get() == "tasks":
+            self.sort_treeview("ACTIVITY_DATE", reverse=True)
+
+        self.auto_fit_columns()
 
     def open_task(self):
         selected_item = self.tree.selection()
@@ -553,7 +619,6 @@ class BitrixApp:
 
         tracker = {}
 
-        # Pobieramy dzisiejszą datę do porównań
         today_date = datetime.now(timezone(timedelta(hours=1))).date()
 
         for msg in reversed(messages):
@@ -574,6 +639,7 @@ class BitrixApp:
                                     re.IGNORECASE)
             stop_match = re.search(r"\[USER=\d+\](.*?)\[/USER\]\s+wyłączył[a]?\s+śledzenie\s+czasu", text,
                                    re.IGNORECASE)
+            finish_match = re.search(r"(ukończył|zakończył)[a]?\s+zadanie", text, re.IGNORECASE)
 
             if start_match:
                 user = start_match.group(1).strip()
@@ -590,11 +656,21 @@ class BitrixApp:
                     elapsed = (dt - tracker[user]["start_dt"]).total_seconds()
                     tracker[user]["total"] += max(0, elapsed)
 
-                    # KOREKTA: Zliczamy do dzisiejszego bilansu jeśli data startu lub stopu to dzisiaj
                     if dt.date() == today_date or tracker[user]["start_dt"].date() == today_date:
                         tracker[user]["today"] += max(0, elapsed)
 
                 tracker[user]["start_dt"] = None
+
+            elif finish_match:
+                for user, data in tracker.items():
+                    if data["start_dt"]:
+                        elapsed = (dt - data["start_dt"]).total_seconds()
+                        data["total"] += max(0, elapsed)
+
+                        if dt.date() == today_date or data["start_dt"].date() == today_date:
+                            data["today"] += max(0, elapsed)
+
+                        data["start_dt"] = None
 
         active_timers = {}
 
@@ -613,12 +689,9 @@ class BitrixApp:
 
                 is_active_today = False
                 if data["start_dt"]:
-                    # KOREKTA: Sprawdzamy czy włączony stoper to rzeczywiście akcja z dzisiaj.
-                    # Odcina to absurdalne sumy wiszących stoperów z innych dni.
                     if data["start_dt"].date() == today_date:
                         is_active_today = True
 
-                # Informacja ile z wyliczonego czasu przypada na dzisiaj
                 today_str = f" (w tym dzisiaj: {seconds_to_readable(data['today'])})" if data['today'] > 0 else ""
 
                 if is_active_today:
