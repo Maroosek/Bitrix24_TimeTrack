@@ -1,4 +1,5 @@
 import os
+import re
 import tkinter as tk
 from tkinter import ttk, messagebox
 import requests
@@ -6,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 
 # Konfiguracja zmiennych
 WEBHOOK_URL = os.environ.get("BITRIX_WEBHOOK", "https://jenaeuropa.bitrix24.pl/rest/223/8cd46qmskggzo81m/")
-ENDPOINT = "task.item.list.json"
 
 STATUS_MAP = {
     "1": "Nowe",
@@ -33,17 +33,14 @@ def format_date(date_string):
     if not date_string:
         return ""
     try:
-        # Parsowanie pełnej daty z uwzględnieniem strefy czasowej
         dt = datetime.fromisoformat(date_string)
 
-        # Jeśli data ma informacje o strefie (np. +03:00), konwertujemy na +01:00
         if dt.tzinfo is not None:
             target_tz = timezone(timedelta(hours=1))
             dt = dt.astimezone(target_tz)
 
         return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
-        # Fallback (bezpiecznik), jeśli format jest nietypowy i wywali błąd
         try:
             return datetime.fromisoformat(date_string.split("+")[0]).strftime("%Y-%m-%d %H:%M")
         except:
@@ -54,20 +51,21 @@ class BitrixApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Bitrix Task Viewer")
-        self.root.geometry("1400x700")
+        self.root.geometry("1450x700")
 
         self.all_fetched_tasks = []
+        self.all_responsibles = ["Wszyscy"]
+
         self.current_filter = tk.StringVar(value="Wszystkie")
         self.current_resp_filter = tk.StringVar(value="Wszyscy")
+        self.search_var = tk.StringVar()
 
         self.create_widgets()
 
     def create_widgets(self):
-        # Górny panel narzędziowy
         frame_top = tk.Frame(self.root)
         frame_top.pack(pady=10, fill="x", padx=10)
 
-        # Przyciski akcji
         btn_frame = tk.Frame(frame_top)
         btn_frame.pack(side="left")
 
@@ -76,26 +74,29 @@ class BitrixApp:
         tk.Button(btn_frame, text="Otwórz zadanie", command=self.open_task, width=15, bg="#2196F3", fg="white").grid(
             row=0, column=1, padx=5)
 
-        # Filtry
         filter_frame = tk.Frame(frame_top)
         filter_frame.pack(side="right")
 
-        # Filtr statusu
         tk.Label(filter_frame, text="Status:").grid(row=0, column=0, padx=(10, 2))
         filter_options = ["Wszystkie"] + list(STATUS_MAP.values())
         self.status_combobox = ttk.Combobox(filter_frame, textvariable=self.current_filter, values=filter_options,
-                                            state="readonly", width=20)
+                                            state="readonly", width=15)
         self.status_combobox.grid(row=0, column=1, padx=2)
         self.status_combobox.bind("<<ComboboxSelected>>", self.apply_filter)
 
-        # Filtr osoby odpowiedzialnej
         tk.Label(filter_frame, text="Osoba odpowiedzialna:").grid(row=0, column=2, padx=(15, 2))
         self.resp_combobox = ttk.Combobox(filter_frame, textvariable=self.current_resp_filter, values=["Wszyscy"],
-                                          state="readonly", width=20)
+                                          width=20)
         self.resp_combobox.grid(row=0, column=3, padx=2)
         self.resp_combobox.bind("<<ComboboxSelected>>", self.apply_filter)
+        self.resp_combobox.bind("<KeyRelease>", self.on_resp_type)
 
-        # Ramka na tabelę i pasek przewijania
+        # NOWE: Wyszukiwarka po nazwie zadania
+        tk.Label(filter_frame, text="Szukaj (tytuł):").grid(row=0, column=4, padx=(15, 2))
+        self.search_entry = tk.Entry(filter_frame, textvariable=self.search_var, width=25)
+        self.search_entry.grid(row=0, column=5, padx=2)
+        self.search_entry.bind("<KeyRelease>", self.apply_filter)
+
         tree_frame = tk.Frame(self.root)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -131,7 +132,7 @@ class BitrixApp:
         self.tree.heading(col, command=lambda _col=col: self.sort_treeview(_col, not reverse))
 
     def fetch_data(self):
-        full_url = f"{WEBHOOK_URL}{ENDPOINT}"
+        full_url = f"{WEBHOOK_URL}task.item.list.json"
         all_tasks = []
         start = 0
 
@@ -166,13 +167,28 @@ class BitrixApp:
             if resp_name:
                 responsibles.add(resp_name)
 
-        options = ["Wszyscy"] + sorted(list(responsibles))
-        self.resp_combobox.config(values=options)
+        self.all_responsibles = ["Wszyscy"] + sorted(list(responsibles))
+        self.resp_combobox.config(values=self.all_responsibles)
         self.current_resp_filter.set("Wszyscy")
+
+    def on_resp_type(self, event):
+        if event.keysym in ("Up", "Down", "Left", "Right", "Return", "Tab"):
+            return
+
+        typed_text = self.current_resp_filter.get().lower()
+
+        if not typed_text:
+            self.resp_combobox.config(values=self.all_responsibles)
+        else:
+            suggestions = [name for name in self.all_responsibles if typed_text in name.lower()]
+            self.resp_combobox.config(values=suggestions)
+
+        self.apply_filter()
 
     def apply_filter(self, event=None):
         selected_status = self.current_filter.get()
-        selected_resp = self.current_resp_filter.get()
+        typed_resp = self.current_resp_filter.get().strip().lower()
+        search_term = self.search_var.get().strip().lower()
 
         filtered_tasks = []
         for task in self.all_fetched_tasks:
@@ -180,11 +196,17 @@ class BitrixApp:
             mapped_status = STATUS_MAP.get(str(real_status), real_status)
 
             resp_name = f"{task.get('RESPONSIBLE_NAME', '')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
+            task_title = task.get("TITLE", "").lower()
 
             match_status = (selected_status == "Wszystkie" or mapped_status == selected_status)
-            match_resp = (selected_resp == "Wszyscy" or resp_name == selected_resp)
+            match_title = (not search_term) or (search_term in task_title)
 
-            if match_status and match_resp:
+            if typed_resp in ("wszyscy", ""):
+                match_resp = True
+            else:
+                match_resp = typed_resp in resp_name.lower()
+
+            if match_status and match_resp and match_title:
                 filtered_tasks.append(task)
 
         self.display_data(filtered_tasks)
@@ -245,7 +267,7 @@ class BitrixApp:
     def show_task_details_window(self, task_data, messages, chat_id):
         top = tk.Toplevel(self.root)
         top.title(f"Zadanie #{task_data.get('id')} - {task_data.get('title')}")
-        top.geometry("800x600")
+        top.geometry("900x700")
 
         main_frame = tk.Frame(top, padx=10, pady=10)
         main_frame.pack(fill="both", expand=True)
@@ -253,11 +275,89 @@ class BitrixApp:
         info_label = tk.Label(main_frame, text="Szczegóły zadania:", font=("Arial", 12, "bold"))
         info_label.pack(anchor="w", pady=(0, 5))
 
-        desc_text = tk.Text(main_frame, height=5, wrap="word", bg="#f0f0f0")
+        desc_text = tk.Text(main_frame, height=4, wrap="word", bg="#f0f0f0")
         desc_text.insert("1.0", task_data.get('description', 'Brak opisu.'))
         desc_text.config(state="disabled")
-        desc_text.pack(fill="x", pady=(0, 15))
+        desc_text.pack(fill="x", pady=(0, 10))
 
+        # --- SEKCJA: ŚLEDZENIE CZASU ---
+        time_frame = tk.LabelFrame(main_frame, text="Raport czasu pracy (z logów czatu)", font=("Arial", 11, "bold"),
+                                   padx=10, pady=5)
+        time_frame.pack(fill="x", pady=(0, 15))
+
+        tracker = {}
+
+        for msg in reversed(messages):
+            text = msg.get("text", "")
+            raw_date = msg.get("date")
+            if not raw_date: continue
+
+            try:
+                dt_obj = datetime.fromisoformat(raw_date)
+                if dt_obj.tzinfo is not None:
+                    dt = dt_obj.astimezone(timezone(timedelta(hours=1)))
+                else:
+                    dt = dt_obj.replace(tzinfo=timezone(timedelta(hours=1)))
+            except Exception:
+                continue
+
+            start_match = re.search(r"\[USER=\d+\](.*?)\[/USER\]\s+włączył[a]?\s+śledzenie\s+czasu", text,
+                                    re.IGNORECASE)
+            stop_match = re.search(r"\[USER=\d+\](.*?)\[/USER\]\s+wyłączył[a]?\s+śledzenie\s+czasu", text,
+                                   re.IGNORECASE)
+
+            if start_match:
+                user = start_match.group(1).strip()
+                if user not in tracker:
+                    tracker[user] = {"total": 0, "start_dt": None}
+                tracker[user]["start_dt"] = dt
+
+            elif stop_match:
+                user = stop_match.group(1).strip()
+                if user not in tracker:
+                    tracker[user] = {"total": 0, "start_dt": None}
+
+                if tracker[user]["start_dt"]:
+                    elapsed = (dt - tracker[user]["start_dt"]).total_seconds()
+                    tracker[user]["total"] += max(0, elapsed)
+                tracker[user]["start_dt"] = None
+
+        # Zmienne dla całkowitego czasu
+        total_base_seconds = 0
+        active_timers = {}
+
+        # Etykieta łącznego czasu (umieszczona na górze ramki)
+        total_time_var = tk.StringVar()
+        total_time_lbl = tk.Label(time_frame, textvariable=total_time_var, font=("Arial", 11, "bold"), fg="#2c3e50")
+        total_time_lbl.pack(anchor="w", pady=(0, 10))
+
+        if not tracker:
+            total_time_var.set("Razem czas na to zadanie: 00:00:00")
+            tk.Label(time_frame, text="Brak zarejestrowanego czasu w wiadomościach.").pack(anchor="w")
+        else:
+            for user, data in tracker.items():
+                total_base_seconds += data["total"]
+
+                lbl_var = tk.StringVar()
+                lbl = tk.Label(time_frame, textvariable=lbl_var, font=("Arial", 10))
+                lbl.pack(anchor="w")
+
+                if data["start_dt"]:
+                    active_timers[user] = {
+                        "total": data["total"],
+                        "start_dt": data["start_dt"],
+                        "var": lbl_var
+                    }
+                else:
+                    lbl_var.set(f"👤 {user}: {seconds_to_readable(data['total'])}")
+
+            if not active_timers:
+                total_time_var.set(f"Razem czas na to zadanie: {seconds_to_readable(total_base_seconds)}")
+
+        if active_timers:
+            self.update_live_timers(top, active_timers, total_time_var, total_base_seconds)
+
+        # --- SEKCJA: CZAT ---
         chat_label_text = f"Wiadomości (Chat ID: {chat_id}):" if chat_id else "Wiadomości (Brak podpiętego czatu):"
         chat_label = tk.Label(main_frame, text=chat_label_text, font=("Arial", 12, "bold"))
         chat_label.pack(anchor="w", pady=(0, 5))
@@ -271,19 +371,44 @@ class BitrixApp:
 
         if messages:
             for msg in reversed(messages):
-                author = msg.get("author_id", "Nieznany")
+                author = msg.get("author_id", "System" if not msg.get("author_id") else msg.get("author_id"))
                 text = msg.get("text", "")
-
-                # Używamy tej samej, poprawionej funkcji daty do wiadomości z czatu!
                 date = format_date(msg.get("date"))
 
+                clean_text = re.sub(r"\[USER=\d+\](.*?)\[/USER\]", r"\1", text)
+
                 chat_text.insert("end", f"[{date}] Użytkownik {author}:\n", "header")
-                chat_text.insert("end", f"{text}\n\n")
+                chat_text.insert("end", f"{clean_text}\n\n")
         else:
             chat_text.insert("end", "Brak wiadomości do wyświetlenia.")
 
         chat_text.tag_config("header", font=("Arial", 10, "bold"))
         chat_text.config(state="disabled")
+
+    def update_live_timers(self, window, active_timers, total_time_var, total_base_seconds):
+        if not window.winfo_exists():
+            return
+
+        now = datetime.now(timezone(timedelta(hours=1)))
+        live_total_elapsed = 0
+
+        for user, data in active_timers.items():
+            elapsed_since_start = (now - data["start_dt"]).total_seconds()
+            live_elapsed = max(0, elapsed_since_start)
+            live_total_elapsed += live_elapsed
+
+            total_current = data["total"] + live_elapsed
+            data["var"].set(f"👤 {user}: {seconds_to_readable(total_current)} (W trakcie...)")
+
+        # Aktualizacja etykiety łącznego czasu na zadanie
+        base_readable = seconds_to_readable(total_base_seconds)
+        if live_total_elapsed > 0:
+            live_readable = seconds_to_readable(live_total_elapsed)
+            total_time_var.set(f"Razem czas na to zadanie: {base_readable} + {live_readable}")
+        else:
+            total_time_var.set(f"Razem czas na to zadanie: {base_readable}")
+
+        window.after(1000, lambda: self.update_live_timers(window, active_timers, total_time_var, total_base_seconds))
 
 
 if __name__ == "__main__":
