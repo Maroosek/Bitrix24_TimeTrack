@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import tkinter.font as tkfont  # Dodany moduł do mierzenia szerokości tekstu
 import requests
+import time
 from datetime import datetime, timezone, timedelta
 
 # Konfiguracja zmiennych
@@ -85,7 +86,7 @@ class BitrixApp:
             "CREATED_BY", "RESPONSIBLE", "DEADLINE", "CREATED_DATE",
             "CHANGED_DATE", "STATUS_CHANGED_DATE", "ACTIVITY_DATE", "GROUP_ID"
         )
-        self.group_columns = ("ID", "NAME", "DESCRIPTION", "OWNER_ID", "DATE_CREATE")
+        self.group_columns = ("ID", "NAME", "DESCRIPTION", "OWNER_ID", "DATE_CREATE", "DATE_ACTIVITY")
 
         self.create_widgets()
         self.load_local_data()
@@ -312,8 +313,12 @@ class BitrixApp:
                 group.get("NAME"),
                 group.get("DESCRIPTION"),
                 group.get("OWNER_ID"),
-                format_date(group.get("DATE_CREATE"))
+                format_date(group.get("DATE_CREATE")),
+                format_date(group.get("DATE_ACTIVITY"))
             ))
+
+        # Wymuszenie domyślnego sortowania grup po kolumnie DATE_ACTIVITY malejąco
+        self.sort_treeview("DATE_ACTIVITY", reverse=True)
 
         # Dopasowanie kolumn po wczytaniu grup
         self.auto_fit_columns()
@@ -550,31 +555,38 @@ class BitrixApp:
             if chat_id:
                 chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json")
 
-                start_param = 0
+                # --- GŁÓWNA, POPRAWNA LOGIKA POBIERANIA (LAST_ID) ---
+                last_id = None
+
                 while True:
-                    chat_resp = requests.get(
-                        f"{WEBHOOK_URL}im.dialog.messages.get?DIALOG_ID=chat{chat_id}&start={start_param}", timeout=10)
+                    url = f"{WEBHOOK_URL}im.dialog.messages.get?DIALOG_ID=chat{chat_id}&LIMIT=50"
+                    if last_id is not None:
+                        url += f"&LAST_ID={last_id}"
+
+                    chat_resp = requests.get(url, timeout=10)
                     chat_resp.raise_for_status()
                     chat_data_json = chat_resp.json()
 
                     fetched_messages = chat_data_json.get("result", {}).get("messages", [])
+
                     if not fetched_messages:
                         break
 
                     messages.extend(fetched_messages)
 
-                    if "next" in chat_data_json:
-                        start_param = chat_data_json["next"]
-                    else:
-                        if len(fetched_messages) == 50:
-                            start_param += 50
-                        else:
-                            break
+                    valid_ids = [msg.get("id") for msg in fetched_messages if msg.get("id")]
+                    if not valid_ids:
+                        break
+
+                    last_id = min(valid_ids)
+                    time.sleep(0.5)
 
                 with open(chat_file_path, "w", encoding="utf-8") as f:
                     json.dump(messages, f, ensure_ascii=False, indent=4)
 
         except requests.exceptions.RequestException:
+            # --- TRYB OFFLINE (Brak internetu) ---
+            # Tutaj wyłącznie wczytujemy pliki z dysku, żadnych zapytań requests!
             if os.path.exists(task_file_path):
                 with open(task_file_path, "r", encoding="utf-8") as f:
                     task_data = json.load(f)
