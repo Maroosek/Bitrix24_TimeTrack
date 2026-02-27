@@ -103,8 +103,13 @@ class BitrixApp:
         self.search_var = tk.StringVar()
         self.activity_date_var = tk.StringVar()
 
-        # Flaga dla liczenia czasu w czasie rzeczywistym
+        # Zmienne do śledzenia wybranej grupy (dla auto-odświeżania)
+        self.current_group_view_id = None
+        self.current_group_view_name = None
+
+        # Flagi dla dodatkowych funkcji
         self.live_timer_var = tk.BooleanVar(value=False)
+        self.hide_inactive_var = tk.BooleanVar(value=False)  # Flaga ukrywania starych zadań
         self.active_tree_timers = {}  # Przechowuje logikę stoperów w widoku Treeview
 
         # Flaga blokująca wielokrotne pobieranie
@@ -123,6 +128,9 @@ class BitrixApp:
         # Uruchomienie pętli odświeżającej czas w tabeli co sekundę
         self._run_live_timers()
 
+        # Uruchomienie cyklicznego odświeżania danych co 5 minut (300 000 ms)
+        self._schedule_auto_refresh()
+
     def create_widgets(self):
         mode_frame = tk.Frame(self.root, bg="#e0e0e0", pady=5)
         mode_frame.pack(fill="x")
@@ -134,10 +142,15 @@ class BitrixApp:
         tk.Radiobutton(mode_frame, text="Grupy robocze", variable=self.current_view, value="groups",
                        command=self.switch_view, bg="#e0e0e0").pack(side="left", padx=10)
 
-        # Nowy Checkbox do liczenia czasu na żywo
-        tk.Checkbutton(mode_frame, text="Licz czas w czasie rzeczywistym (dla zadań W trakcie)",
+        # Checkbox do liczenia czasu na żywo
+        tk.Checkbutton(mode_frame, text="Licz czas na żywo",
                        variable=self.live_timer_var, command=self.apply_filter,
-                       bg="#e0e0e0").pack(side="left", padx=(20, 10))
+                       bg="#e0e0e0").pack(side="left", padx=(10, 5))
+
+        # Nowy Checkbox do ukrywania zadań nieaktywnych od tygodnia
+        tk.Checkbutton(mode_frame, text="Ukryj 'W trakcie' nieaktywne > 7 dni",
+                       variable=self.hide_inactive_var, command=self.apply_filter,
+                       bg="#e0e0e0").pack(side="left", padx=(5, 10))
 
         frame_top = tk.Frame(self.root)
         frame_top.pack(pady=10, fill="x", padx=10)
@@ -346,7 +359,36 @@ class BitrixApp:
             self.tree.move(child, "", index)
         self.tree.heading(col, command=lambda _col=col: self.sort_treeview(_col, not reverse))
 
-    def fetch_data(self):
+    def _schedule_auto_refresh(self):
+        """Rejestruje kolejne automatyczne odświeżenie za 5 minut."""
+        self.root.after(300000, self._auto_refresh_trigger)
+
+    def _auto_refresh_trigger(self):
+        """Wyzwalacz aktualizacji w tle, który decyduje, co powinno zostać odświeżone."""
+        if not self.is_fetching:
+            mode = self.current_view.get()
+            if mode == "tasks":
+                # Jeśli obecnie przeglądamy zadania z danej grupy, zaktualizuj tylko je
+                if self.current_group_view_id:
+                    self.is_fetching = True
+                    self._toggle_buttons_state("disabled")
+                    self.status_var.set(f"Automatyczne odświeżanie zadań grupy w tle...")
+                    threading.Thread(
+                        target=self._bg_filter_tasks_by_group,
+                        args=(self.current_group_view_id, self.current_group_view_name, True),
+                        daemon=True
+                    ).start()
+                else:
+                    # Zaktualizuj wszystkie zadania
+                    self.fetch_data(is_auto=True)
+            elif mode == "groups":
+                self.fetch_data(is_auto=True)
+
+        # Zawsze zaplanuj kolejne odświeżenie
+        self._schedule_auto_refresh()
+
+    def fetch_data(self, is_auto=False):
+        """Rozpoczyna pobieranie zadań/grup. Parametr is_auto zapobiega wyskakiwaniu okienek z informacją."""
         if self.is_fetching:
             return
 
@@ -355,11 +397,19 @@ class BitrixApp:
         self._toggle_buttons_state("disabled")
 
         if mode == "tasks":
-            self.status_var.set("Inicjowanie pobierania zadań...")
-            threading.Thread(target=self._bg_fetch_all_tasks, daemon=True).start()
+            # Przy ręcznym wywołaniu pobrania zadań resetujemy widok filtrowanej grupy
+            if not is_auto:
+                self.current_group_view_id = None
+                self.current_group_view_name = None
+
+            self.status_var.set(
+                "Automatyczne odświeżanie zadań w tle..." if is_auto else "Inicjowanie pobierania zadań...")
+            threading.Thread(target=self._bg_fetch_all_tasks, args=(is_auto,), daemon=True).start()
+
         elif mode == "groups":
-            self.status_var.set("Inicjowanie pobierania grup...")
-            threading.Thread(target=self._bg_fetch_all_groups, daemon=True).start()
+            self.status_var.set(
+                "Automatyczne odświeżanie grup w tle..." if is_auto else "Inicjowanie pobierania grup...")
+            threading.Thread(target=self._bg_fetch_all_groups, args=(is_auto,), daemon=True).start()
 
     def _toggle_buttons_state(self, state):
         self.btn_fetch.config(state=state)
@@ -371,7 +421,7 @@ class BitrixApp:
         self.status_var.set(message)
         self.root.after(4000, lambda: self.status_var.set(""))
 
-    def _bg_fetch_all_groups(self):
+    def _bg_fetch_all_groups(self, is_auto=False):
         full_url = f"{WEBHOOK_URL}sonet_group.get.json"
         all_groups = []
         start = 0
@@ -387,7 +437,10 @@ class BitrixApp:
 
                 groups = data["result"]
                 all_groups.extend(groups)
-                self.root.after(0, lambda c=len(all_groups): self.status_var.set(f"Pobrano {c} grup..."))
+
+                # Ciche raportowanie w trybie auto
+                status_msg = f"Odświeżono w tle {len(all_groups)} grup..." if is_auto else f"Pobrano {len(all_groups)} grup..."
+                self.root.after(0, lambda msg=status_msg: self.status_var.set(msg))
 
                 if "next" in data:
                     start = data["next"]
@@ -398,19 +451,23 @@ class BitrixApp:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(all_groups, f, ensure_ascii=False, indent=4)
 
-            self.root.after(0, self._on_fetch_groups_success, all_groups)
+            self.root.after(0, self._on_fetch_groups_success, all_groups, is_auto)
 
         except requests.exceptions.RequestException as e:
             self.root.after(0, self._on_fetch_error, e, "grup")
 
-    def _on_fetch_groups_success(self, all_groups):
+    def _on_fetch_groups_success(self, all_groups, is_auto=False):
         self.all_fetched_groups = all_groups
         self.build_groups_map()
         self.display_groups(all_groups)
-        self._reset_fetch_status("Pomyślnie pobrano grupy.")
-        messagebox.showinfo("Sukces", "Pobrano i zapisano grupy robocze.")
 
-    def _bg_fetch_all_tasks(self):
+        if is_auto:
+            self._reset_fetch_status(f"Zakończono automatyczne odświeżanie ({datetime.now().strftime('%H:%M')}).")
+        else:
+            self._reset_fetch_status("Pomyślnie pobrano grupy.")
+            messagebox.showinfo("Sukces", "Pobrano i zapisano grupy robocze.")
+
+    def _bg_fetch_all_tasks(self, is_auto=False):
         full_url = f"{WEBHOOK_URL}task.item.list.json"
         all_tasks = []
         start = 0
@@ -426,7 +483,9 @@ class BitrixApp:
 
                 tasks = data["result"]
                 all_tasks.extend(tasks)
-                self.root.after(0, lambda c=len(all_tasks): self.status_var.set(f"Pobrano {c} zadań..."))
+
+                status_msg = f"Odświeżono w tle {len(all_tasks)} zadań..." if is_auto else f"Pobrano {len(all_tasks)} zadań..."
+                self.root.after(0, lambda msg=status_msg: self.status_var.set(msg))
 
                 if "next" in data:
                     start = data["next"]
@@ -437,17 +496,21 @@ class BitrixApp:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(all_tasks, f, ensure_ascii=False, indent=4)
 
-            self.root.after(0, self._on_fetch_tasks_success, all_tasks)
+            self.root.after(0, self._on_fetch_tasks_success, all_tasks, is_auto)
 
         except requests.exceptions.RequestException as e:
             self.root.after(0, self._on_fetch_error, e, "zadań")
 
-    def _on_fetch_tasks_success(self, all_tasks):
+    def _on_fetch_tasks_success(self, all_tasks, is_auto=False):
         self.all_fetched_tasks = all_tasks
         self.update_resp_filter_options()
         self.apply_filter()
-        self._reset_fetch_status("Pomyślnie pobrano zadania.")
-        messagebox.showinfo("Sukces", "Pobrano i zapisano wszystkie zadania.")
+
+        if is_auto:
+            self._reset_fetch_status(f"Zakończono automatyczne odświeżanie ({datetime.now().strftime('%H:%M')}).")
+        else:
+            self._reset_fetch_status("Pomyślnie pobrano zadania.")
+            messagebox.showinfo("Sukces", "Pobrano i zapisano wszystkie zadania.")
 
     def _on_fetch_error(self, e, category):
         self._reset_fetch_status("Wystąpił błąd pobierania.", success=False)
@@ -457,6 +520,10 @@ class BitrixApp:
     def display_groups(self, groups):
         if self.current_view.get() != "groups":
             return
+
+        # Zapamiętanie zaznaczonych elementów przed odświeżeniem
+        selected_ids = [self.tree.item(item, "values")[0] for item in self.tree.selection()]
+
         for row in self.tree.get_children():
             self.tree.delete(row)
 
@@ -469,6 +536,12 @@ class BitrixApp:
                 format_date(group.get("DATE_CREATE")),
                 format_date(group.get("DATE_ACTIVITY"))
             ))
+
+        # Odtworzenie zaznaczenia
+        for item in self.tree.get_children():
+            if self.tree.item(item, "values")[0] in selected_ids:
+                self.tree.selection_add(item)
+
         self.sort_treeview("DATE_ACTIVITY", reverse=True)
         self.auto_fit_columns()
 
@@ -492,12 +565,15 @@ class BitrixApp:
         group_id = item_values[0]
         group_name = item_values[1]
 
+        self.current_group_view_id = group_id
+        self.current_group_view_name = group_name
+
         self.is_fetching = True
         self._toggle_buttons_state("disabled")
         self.status_var.set(f"Pobieranie zadań grupy: {group_name}...")
         threading.Thread(target=self._bg_filter_tasks_by_group, args=(group_id, group_name), daemon=True).start()
 
-    def _bg_filter_tasks_by_group(self, group_id, group_name):
+    def _bg_filter_tasks_by_group(self, group_id, group_name, is_auto=False):
         full_url = f"{WEBHOOK_URL}tasks.task.list.json?filter[GROUP_ID]={group_id}"
         group_tasks = []
         start = 0
@@ -514,21 +590,22 @@ class BitrixApp:
                 tasks = data["result"].get("tasks", [])
                 group_tasks.extend(tasks)
 
-                self.root.after(0, lambda c=len(group_tasks): self.status_var.set(f"Pobrano {c} zadań grupy..."))
+                status_msg = f"Odświeżono w tle {len(group_tasks)} zadań grupy..." if is_auto else f"Pobrano {len(group_tasks)} zadań grupy..."
+                self.root.after(0, lambda msg=status_msg: self.status_var.set(msg))
 
                 if "next" in data:
                     start = data["next"]
                 else:
                     break
 
-            self.root.after(0, self._on_filter_tasks_success, group_tasks, group_name)
+            self.root.after(0, self._on_filter_tasks_success, group_tasks, group_name, is_auto)
 
         except Exception as e:
             self.root.after(0, self._on_filter_tasks_error, e, group_name)
 
-    def _on_filter_tasks_success(self, group_tasks, group_name):
-        self._reset_fetch_status("Pobrano zadania dla grupy.")
-        if not group_tasks:
+    def _on_filter_tasks_success(self, group_tasks, group_name, is_auto=False):
+        if not is_auto and not group_tasks:
+            self._reset_fetch_status("Zakończono pobieranie.")
             messagebox.showinfo("Informacja", f"Brak zadań w grupie: {group_name}")
             return
 
@@ -537,7 +614,12 @@ class BitrixApp:
         self.switch_view()
         self.update_resp_filter_options()
         self.apply_filter()
-        messagebox.showinfo("Sukces", f"Wyświetlono zadania dla projektu: {group_name}")
+
+        if is_auto:
+            self._reset_fetch_status(f"Zakończono automatyczne odświeżanie ({datetime.now().strftime('%H:%M')}).")
+        else:
+            self._reset_fetch_status("Pobrano zadania dla grupy.")
+            messagebox.showinfo("Sukces", f"Wyświetlono zadania dla projektu: {group_name}")
 
     def _on_filter_tasks_error(self, e, group_name):
         self._reset_fetch_status("Błąd pobierania zadań grupy.", success=False)
@@ -578,6 +660,10 @@ class BitrixApp:
         search_term = self.search_var.get().strip().lower()
         filter_date = self.activity_date_var.get().strip()
 
+        # Obliczenie daty progowej (aktualny czas minus 7 dni)
+        hide_inactive = self.hide_inactive_var.get()
+        threshold_date_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+
         filtered_tasks = []
         for task in self.all_fetched_tasks:
             real_status = str(task.get("REAL_STATUS") or task.get("status", ""))
@@ -599,12 +685,20 @@ class BitrixApp:
             if filter_date and len(filter_date) >= 4:
                 match_activity = activity_date_str >= filter_date
 
+            # Logika odrzucająca zadania "W trakcie" i bez aktywności powyżej 7 dni
+            if hide_inactive and real_status == "3":
+                if not activity_date_str or activity_date_str < threshold_date_str:
+                    match_activity = False
+
             if match_status and match_resp and match_title and match_activity:
                 filtered_tasks.append(task)
 
         self.display_data(filtered_tasks)
 
     def display_data(self, tasks):
+        # Zapamiętanie wybranego wiersza, by móc go odtworzyć po odświeżeniu
+        selected_ids = [self.tree.item(item, "values")[0] for item in self.tree.selection()]
+
         for row in self.tree.get_children():
             self.tree.delete(row)
 
@@ -653,6 +747,11 @@ class BitrixApp:
                         "base_time": base_time_spent,
                         "activity_dt": act_dt
                     }
+
+        # Odtworzenie zaznaczenia
+        for item in self.tree.get_children():
+            if self.tree.item(item, "values")[0] in selected_ids:
+                self.tree.selection_add(item)
 
         if self.current_view.get() == "tasks":
             self.sort_treeview("ACTIVITY_DATE", reverse=True)
