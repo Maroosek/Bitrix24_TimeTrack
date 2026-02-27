@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 import tkinter.font as tkfont
@@ -63,6 +64,25 @@ def format_date(date_string):
             return date_string
 
 
+def parse_to_aware_datetime(date_string):
+    """Zwraca obiekt datetime ze strefą czasową na potrzeby obliczeń czasu rzeczywistego."""
+    if not date_string:
+        return None
+    try:
+        dt = datetime.fromisoformat(date_string)
+        if dt.tzinfo is None:
+            # Jeśli brak strefy, zakładamy offset uzywany w programie (+1h)
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=1)))
+        return dt
+    except Exception:
+        try:
+            dt = datetime.fromisoformat(date_string.split("+")[0])
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=1)))
+            return dt
+        except:
+            return None
+
+
 class BitrixApp:
     def __init__(self, root):
         self.root = root
@@ -74,18 +94,22 @@ class BitrixApp:
         self.all_fetched_groups = []
         self.all_responsibles = ["Wszyscy"]
 
-        # Słowniki do mapowania
         self.groups_map = {}
         self.users_map = {}
 
         self.current_view = tk.StringVar(value="tasks")
-
         self.current_filter = tk.StringVar(value="W trakcie")
         self.current_resp_filter = tk.StringVar(value="Wszyscy")
         self.search_var = tk.StringVar()
         self.activity_date_var = tk.StringVar()
 
-        # Usunięto kolumnę STATUS, zmieniono GROUP_ID na GROUP (dla nazw)
+        # Flaga dla liczenia czasu w czasie rzeczywistym
+        self.live_timer_var = tk.BooleanVar(value=False)
+        self.active_tree_timers = {}  # Przechowuje logikę stoperów w widoku Treeview
+
+        # Flaga blokująca wielokrotne pobieranie
+        self.is_fetching = False
+
         self.task_columns = (
             "ID", "TITLE", "REAL_STATUS", "TIME_SPENT",
             "CREATED_BY", "RESPONSIBLE", "DEADLINE", "CREATED_DATE",
@@ -95,6 +119,9 @@ class BitrixApp:
 
         self.create_widgets()
         self.load_local_data()
+
+        # Uruchomienie pętli odświeżającej czas w tabeli co sekundę
+        self._run_live_timers()
 
     def create_widgets(self):
         mode_frame = tk.Frame(self.root, bg="#e0e0e0", pady=5)
@@ -106,6 +133,11 @@ class BitrixApp:
                        bg="#e0e0e0").pack(side="left")
         tk.Radiobutton(mode_frame, text="Grupy robocze", variable=self.current_view, value="groups",
                        command=self.switch_view, bg="#e0e0e0").pack(side="left", padx=10)
+
+        # Nowy Checkbox do liczenia czasu na żywo
+        tk.Checkbutton(mode_frame, text="Licz czas w czasie rzeczywistym (dla zadań W trakcie)",
+                       variable=self.live_timer_var, command=self.apply_filter,
+                       bg="#e0e0e0").pack(side="left", padx=(20, 10))
 
         frame_top = tk.Frame(self.root)
         frame_top.pack(pady=10, fill="x", padx=10)
@@ -120,6 +152,12 @@ class BitrixApp:
         self.btn_action = tk.Button(self.btn_frame, text="Otwórz zadanie", command=self.handle_main_action, width=20,
                                     bg="#2196F3", fg="white")
         self.btn_action.grid(row=0, column=1, padx=5)
+
+        # Dodanie etykiety statusu obok przycisków
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(self.btn_frame, textvariable=self.status_var, fg="#0052cc",
+                                     font=("Arial", 10, "italic"))
+        self.status_label.grid(row=0, column=2, padx=10)
 
         self.filter_frame = tk.Frame(frame_top)
         self.filter_frame.pack(side="right")
@@ -157,8 +195,8 @@ class BitrixApp:
         tree_scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal")
         tree_scroll_x.pack(side="bottom", fill="x")
 
-        self.tree = ttk.Treeview(tree_frame, columns=self.task_columns, show="headings",
-                                 yscrollcommand=tree_scroll.set, xscrollcommand=tree_scroll_x.set)
+        self.tree = ttk.Treeview(tree_frame, columns=self.task_columns, show="headings", yscrollcommand=tree_scroll.set,
+                                 xscrollcommand=tree_scroll_x.set)
 
         tree_scroll.config(command=self.tree.yview)
         tree_scroll_x.config(command=self.tree.xview)
@@ -175,7 +213,6 @@ class BitrixApp:
 
         for col in columns:
             max_width = font.measure(col) + 30
-
             for item in self.tree.get_children():
                 val = self.tree.set(item, col)
                 if val:
@@ -195,6 +232,8 @@ class BitrixApp:
 
         for row in self.tree.get_children():
             self.tree.delete(row)
+
+        self.active_tree_timers.clear()
 
         if mode == "tasks":
             self.btn_fetch.config(text="Pobierz / Odśwież zadania")
@@ -254,7 +293,6 @@ class BitrixApp:
             print(f"Nie udało się pobrać użytkowników: {e}")
 
     def load_local_data(self):
-        # Grupy
         groups_path = os.path.join(self.data_dir, "groups_list.json")
         if os.path.exists(groups_path):
             try:
@@ -264,7 +302,6 @@ class BitrixApp:
             except Exception as e:
                 print(f"Nie udało się wczytać grup: {e}")
 
-        # Zadania
         tasks_path = os.path.join(self.data_dir, "tasks_list.json")
         if os.path.exists(tasks_path):
             try:
@@ -274,14 +311,12 @@ class BitrixApp:
             except Exception as e:
                 print(f"Nie udało się wczytać zadań: {e}")
 
-        # Użytkownicy (pobierz jeśli nie ma pliku)
         users_path = os.path.join(self.data_dir, "users_list.json")
         if os.path.exists(users_path):
             try:
                 with open(users_path, "r", encoding="utf-8") as f:
                     self.users_map = json.load(f)
             except Exception as e:
-                print(f"Nie udało się wczytać użytkowników: {e}")
                 self.fetch_all_users()
         else:
             self.fetch_all_users()
@@ -298,25 +333,45 @@ class BitrixApp:
             if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", val):
                 return (1, val)
             try:
+                # Zamiana formatu czasu hh:mm:ss na sekundy dla prawidłowego sortowania
+                if col == "TIME_SPENT" and val.count(':') == 2:
+                    parts = val.split(':')
+                    return (2, int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2]))
                 return (2, float(val))
             except ValueError:
                 return (3, val.lower())
 
         data.sort(key=custom_sort, reverse=reverse)
-
         for index, (_, child) in enumerate(data):
             self.tree.move(child, "", index)
-
         self.tree.heading(col, command=lambda _col=col: self.sort_treeview(_col, not reverse))
 
     def fetch_data(self):
-        mode = self.current_view.get()
-        if mode == "tasks":
-            self.fetch_all_tasks()
-        elif mode == "groups":
-            self.fetch_all_groups()
+        if self.is_fetching:
+            return
 
-    def fetch_all_groups(self):
+        mode = self.current_view.get()
+        self.is_fetching = True
+        self._toggle_buttons_state("disabled")
+
+        if mode == "tasks":
+            self.status_var.set("Inicjowanie pobierania zadań...")
+            threading.Thread(target=self._bg_fetch_all_tasks, daemon=True).start()
+        elif mode == "groups":
+            self.status_var.set("Inicjowanie pobierania grup...")
+            threading.Thread(target=self._bg_fetch_all_groups, daemon=True).start()
+
+    def _toggle_buttons_state(self, state):
+        self.btn_fetch.config(state=state)
+        self.btn_action.config(state=state)
+
+    def _reset_fetch_status(self, message, success=True):
+        self.is_fetching = False
+        self._toggle_buttons_state("normal")
+        self.status_var.set(message)
+        self.root.after(4000, lambda: self.status_var.set(""))
+
+    def _bg_fetch_all_groups(self):
         full_url = f"{WEBHOOK_URL}sonet_group.get.json"
         all_groups = []
         start = 0
@@ -332,29 +387,76 @@ class BitrixApp:
 
                 groups = data["result"]
                 all_groups.extend(groups)
+                self.root.after(0, lambda c=len(all_groups): self.status_var.set(f"Pobrano {c} grup..."))
 
                 if "next" in data:
                     start = data["next"]
                 else:
                     break
 
-            self.all_fetched_groups = all_groups
-            self.build_groups_map()
-            self.display_groups(all_groups)
-
             file_path = os.path.join(self.data_dir, "groups_list.json")
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(all_groups, f, ensure_ascii=False, indent=4)
 
-            messagebox.showinfo("Sukces", "Pobrano i zapisano grupy robocze.")
+            self.root.after(0, self._on_fetch_groups_success, all_groups)
 
         except requests.exceptions.RequestException as e:
-            messagebox.showwarning("Błąd", f"Nie udało się pobrać grup.\n{e}")
+            self.root.after(0, self._on_fetch_error, e, "grup")
+
+    def _on_fetch_groups_success(self, all_groups):
+        self.all_fetched_groups = all_groups
+        self.build_groups_map()
+        self.display_groups(all_groups)
+        self._reset_fetch_status("Pomyślnie pobrano grupy.")
+        messagebox.showinfo("Sukces", "Pobrano i zapisano grupy robocze.")
+
+    def _bg_fetch_all_tasks(self):
+        full_url = f"{WEBHOOK_URL}task.item.list.json"
+        all_tasks = []
+        start = 0
+
+        try:
+            while True:
+                response = requests.get(f"{full_url}?start={start}", timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                if "result" not in data:
+                    break
+
+                tasks = data["result"]
+                all_tasks.extend(tasks)
+                self.root.after(0, lambda c=len(all_tasks): self.status_var.set(f"Pobrano {c} zadań..."))
+
+                if "next" in data:
+                    start = data["next"]
+                else:
+                    break
+
+            file_path = os.path.join(self.data_dir, "tasks_list.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(all_tasks, f, ensure_ascii=False, indent=4)
+
+            self.root.after(0, self._on_fetch_tasks_success, all_tasks)
+
+        except requests.exceptions.RequestException as e:
+            self.root.after(0, self._on_fetch_error, e, "zadań")
+
+    def _on_fetch_tasks_success(self, all_tasks):
+        self.all_fetched_tasks = all_tasks
+        self.update_resp_filter_options()
+        self.apply_filter()
+        self._reset_fetch_status("Pomyślnie pobrano zadania.")
+        messagebox.showinfo("Sukces", "Pobrano i zapisano wszystkie zadania.")
+
+    def _on_fetch_error(self, e, category):
+        self._reset_fetch_status("Wystąpił błąd pobierania.", success=False)
+        messagebox.showwarning("Tryb Offline",
+                               f"Nie udało się pobrać {category}. Przeglądasz dane zapisane lokalnie.\nSzczegóły błędu: {e}")
 
     def display_groups(self, groups):
         if self.current_view.get() != "groups":
             return
-
         for row in self.tree.get_children():
             self.tree.delete(row)
 
@@ -367,7 +469,6 @@ class BitrixApp:
                 format_date(group.get("DATE_CREATE")),
                 format_date(group.get("DATE_ACTIVITY"))
             ))
-
         self.sort_treeview("DATE_ACTIVITY", reverse=True)
         self.auto_fit_columns()
 
@@ -384,10 +485,19 @@ class BitrixApp:
             messagebox.showwarning("Uwaga", "Proszę wybrać grupę z tabeli.")
             return
 
+        if self.is_fetching:
+            return
+
         item_values = self.tree.item(selected_item[0], "values")
         group_id = item_values[0]
         group_name = item_values[1]
 
+        self.is_fetching = True
+        self._toggle_buttons_state("disabled")
+        self.status_var.set(f"Pobieranie zadań grupy: {group_name}...")
+        threading.Thread(target=self._bg_filter_tasks_by_group, args=(group_id, group_name), daemon=True).start()
+
+    def _bg_filter_tasks_by_group(self, group_id, group_name):
         full_url = f"{WEBHOOK_URL}tasks.task.list.json?filter[GROUP_ID]={group_id}"
         group_tasks = []
         start = 0
@@ -404,71 +514,42 @@ class BitrixApp:
                 tasks = data["result"].get("tasks", [])
                 group_tasks.extend(tasks)
 
+                self.root.after(0, lambda c=len(group_tasks): self.status_var.set(f"Pobrano {c} zadań grupy..."))
+
                 if "next" in data:
                     start = data["next"]
                 else:
                     break
 
-            if not group_tasks:
-                messagebox.showinfo("Informacja", f"Brak zadań w grupie: {group_name}")
-                return
-
-            self.all_fetched_tasks = group_tasks
-            self.current_view.set("tasks")
-            self.switch_view()
-            self.update_resp_filter_options()
-            self.apply_filter()
-
-            messagebox.showinfo("Sukces", f"Wyświetlono zadania dla projektu: {group_name}")
+            self.root.after(0, self._on_filter_tasks_success, group_tasks, group_name)
 
         except Exception as e:
-            messagebox.showerror("Błąd", f"Nie udało się pobrać zadań dla tej grupy:\n{str(e)}")
+            self.root.after(0, self._on_filter_tasks_error, e, group_name)
 
-    def fetch_all_tasks(self):
-        full_url = f"{WEBHOOK_URL}task.item.list.json"
-        all_tasks = []
-        start = 0
+    def _on_filter_tasks_success(self, group_tasks, group_name):
+        self._reset_fetch_status("Pobrano zadania dla grupy.")
+        if not group_tasks:
+            messagebox.showinfo("Informacja", f"Brak zadań w grupie: {group_name}")
+            return
 
-        try:
-            while True:
-                response = requests.get(f"{full_url}?start={start}", timeout=10)
-                response.raise_for_status()
-                data = response.json()
+        self.all_fetched_tasks = group_tasks
+        self.current_view.set("tasks")
+        self.switch_view()
+        self.update_resp_filter_options()
+        self.apply_filter()
+        messagebox.showinfo("Sukces", f"Wyświetlono zadania dla projektu: {group_name}")
 
-                if "result" not in data:
-                    break
-
-                tasks = data["result"]
-                all_tasks.extend(tasks)
-
-                if "next" in data:
-                    start = data["next"]
-                else:
-                    break
-
-            self.all_fetched_tasks = all_tasks
-            self.update_resp_filter_options()
-            self.apply_filter()
-
-            file_path = os.path.join(self.data_dir, "tasks_list.json")
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(all_tasks, f, ensure_ascii=False, indent=4)
-
-            messagebox.showinfo("Sukces", "Pobrano i zapisano wszystkie zadania.")
-
-        except requests.exceptions.RequestException as e:
-            messagebox.showwarning("Tryb Offline",
-                                   f"Nie udało się połączyć z serwerem. Przeglądasz dane zapisane lokalnie.\nSzczegóły błędu: {e}")
+    def _on_filter_tasks_error(self, e, group_name):
+        self._reset_fetch_status("Błąd pobierania zadań grupy.", success=False)
+        messagebox.showerror("Błąd", f"Nie udało się pobrać zadań dla {group_name}:\n{str(e)}")
 
     def update_resp_filter_options(self):
         responsibles = set()
         for task in self.all_fetched_tasks:
             resp_name = f"{task.get('RESPONSIBLE_NAME', '')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
-
             if not resp_name and 'responsible' in task:
                 resp = task['responsible']
                 resp_name = f"{resp.get('name', '')} {resp.get('lastName', '')}".strip()
-
             if resp_name:
                 responsibles.add(resp_name)
 
@@ -508,17 +589,11 @@ class BitrixApp:
                 resp_name = f"{resp.get('name', '')} {resp.get('lastName', '')}".strip()
 
             task_title = (task.get("TITLE") or task.get("title", "")).lower()
-
-            activity_date_raw = task.get("ACTIVITY_DATE") or task.get("activityDate") or ""
-            activity_date_str = format_date(activity_date_raw)
+            activity_date_str = format_date(task.get("ACTIVITY_DATE") or task.get("activityDate") or "")
 
             match_status = (selected_status == "Wszystkie" or mapped_status == selected_status)
             match_title = (not search_term) or (search_term in task_title)
-
-            if typed_resp in ("wszyscy", ""):
-                match_resp = True
-            else:
-                match_resp = typed_resp in resp_name.lower()
+            match_resp = True if typed_resp in ("wszyscy", "") else (typed_resp in resp_name.lower())
 
             match_activity = True
             if filter_date and len(filter_date) >= 4:
@@ -533,6 +608,8 @@ class BitrixApp:
         for row in self.tree.get_children():
             self.tree.delete(row)
 
+        self.active_tree_timers.clear()
+
         for task in tasks:
             t_id = task.get("ID") or task.get("id")
             title = task.get("TITLE") or task.get("title")
@@ -540,7 +617,7 @@ class BitrixApp:
             r_status = str(task.get("REAL_STATUS") or task.get("status", ""))
             real_status_text = STATUS_MAP.get(r_status, r_status)
 
-            time_spent = seconds_to_readable(task.get("TIME_SPENT_IN_LOGS") or task.get("timeSpentInLogs", 0))
+            base_time_spent = int(task.get("TIME_SPENT_IN_LOGS") or task.get("timeSpentInLogs", 0))
 
             c_by = f"{task.get('CREATED_BY_NAME', '')} {task.get('CREATED_BY_LAST_NAME', '')}".strip()
             if not c_by and 'creator' in task:
@@ -558,18 +635,59 @@ class BitrixApp:
             g_id = str(task.get("GROUP_ID") or task.get("groupId") or "")
             group_name = self.groups_map.get(g_id, g_id) if g_id else ""
 
-            activity_date = format_date(task.get("ACTIVITY_DATE") or task.get("activityDate"))
+            raw_activity_date = task.get("ACTIVITY_DATE") or task.get("activityDate")
+            activity_date = format_date(raw_activity_date)
 
-            # Nie wstawiamy już status_text (kolumny STATUS)
-            self.tree.insert("", "end", values=(
-                t_id, title, real_status_text, time_spent,
+            time_spent_str = seconds_to_readable(base_time_spent)
+
+            item_id = self.tree.insert("", "end", values=(
+                t_id, title, real_status_text, time_spent_str,
                 c_by, resp, deadline, created, changed, status_changed, activity_date, group_name
             ))
 
+            # Jeśli flaga włączona i zadanie ma status "W trakcie" (czyli kod 3) - zaczynamy pomiar na żywo
+            if self.live_timer_var.get() and r_status == "3":
+                act_dt = parse_to_aware_datetime(raw_activity_date)
+                if act_dt:
+                    self.active_tree_timers[item_id] = {
+                        "base_time": base_time_spent,
+                        "activity_dt": act_dt
+                    }
+
         if self.current_view.get() == "tasks":
             self.sort_treeview("ACTIVITY_DATE", reverse=True)
-
         self.auto_fit_columns()
+
+    def _run_live_timers(self):
+        """Pętla asynchroniczna aktualizująca czas na żywo w kolumnie TIME_SPENT."""
+        if self.current_view.get() == "tasks" and self.live_timer_var.get():
+            now = datetime.now(timezone.utc)
+            for item_id, data in self.active_tree_timers.items():
+                if self.tree.exists(item_id):
+                    elapsed = (now - data["activity_dt"]).total_seconds()
+                    if elapsed > 0:
+                        total_time = data["base_time"] + int(elapsed)
+                        # Aktualizacja 4 kolumny -> indeks 3 (TIME_SPENT)
+                        current_values = list(self.tree.item(item_id, "values"))
+                        if current_values:
+                            current_values[3] = seconds_to_readable(total_time)
+                            self.tree.item(item_id, values=current_values)
+
+        # Powtarzaj co 1 sekundę
+        self.root.after(1000, self._run_live_timers)
+
+    def _check_and_fetch_missing_users(self, task_data, messages):
+        required_ids = set()
+        if task_data.get("createdBy"): required_ids.add(str(task_data.get("createdBy")))
+        if task_data.get("responsibleId"): required_ids.add(str(task_data.get("responsibleId")))
+
+        for msg in messages:
+            if msg.get("author_id"):
+                required_ids.add(str(msg.get("author_id")))
+
+        missing_ids = [uid for uid in required_ids if uid not in self.users_map and uid != "0"]
+        if missing_ids:
+            self.fetch_all_users()
 
     def open_task(self):
         selected_item = self.tree.selection()
@@ -581,31 +699,58 @@ class BitrixApp:
         task_id = item_values[0]
 
         task_file_path = os.path.join(self.data_dir, "details", f"task_{task_id}.json")
-        chat_id = None
         task_data = {}
-        messages = []
 
         try:
             task_resp = requests.get(f"{WEBHOOK_URL}tasks.task.get?taskId={task_id}", timeout=5)
             task_resp.raise_for_status()
             task_data = task_resp.json().get("result", {}).get("task", {})
-
             if task_data:
                 with open(task_file_path, "w", encoding="utf-8") as f:
                     json.dump(task_data, f, ensure_ascii=False, indent=4)
+        except Exception:
+            if os.path.exists(task_file_path):
+                with open(task_file_path, "r", encoding="utf-8") as f:
+                    task_data = json.load(f)
+            else:
+                messagebox.showerror("Błąd", "Brak internetu i brak lokalnej kopii zadania.")
+                return
 
-            chat_id = task_data.get("chatId") or task_data.get("CHAT_ID")
+        chat_id = task_data.get("chatId") or task_data.get("CHAT_ID")
+        chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json") if chat_id else None
 
-            if chat_id:
-                chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json")
-                last_id = None
+        local_messages = []
 
-                while True:
-                    url = f"{WEBHOOK_URL}im.dialog.messages.get?DIALOG_ID=chat{chat_id}&LIMIT=50"
-                    if last_id is not None:
-                        url += f"&LAST_ID={last_id}"
+        if chat_file_path and os.path.exists(chat_file_path):
+            try:
+                with open(chat_file_path, "r", encoding="utf-8") as f:
+                    local_messages = json.load(f)
+            except Exception:
+                pass
 
-                    chat_resp = requests.get(url, timeout=10)
+        self._check_and_fetch_missing_users(task_data, local_messages)
+
+        top_window = self.create_task_window()
+        self._build_task_window_ui(top_window, task_data, local_messages, chat_id)
+
+        if chat_id:
+            thread = threading.Thread(target=self.bg_fetch_messages,
+                                      args=(task_data, chat_id, chat_file_path, top_window), daemon=True)
+            thread.start()
+
+    def bg_fetch_messages(self, task_data, chat_id, chat_file_path, window):
+        messages = []
+        last_id = None
+        current_timeout = 5
+
+        try:
+            while True:
+                url = f"{WEBHOOK_URL}im.dialog.messages.get?DIALOG_ID=chat{chat_id}&LIMIT=50"
+                if last_id is not None:
+                    url += f"&LAST_ID={last_id}"
+
+                try:
+                    chat_resp = requests.get(url, timeout=current_timeout)
                     chat_resp.raise_for_status()
                     chat_data_json = chat_resp.json()
 
@@ -622,52 +767,45 @@ class BitrixApp:
 
                     last_id = min(valid_ids)
                     time.sleep(0.5)
+                    current_timeout = 5
 
+                except requests.exceptions.Timeout:
+                    current_timeout += 10
+                    if current_timeout > 45:
+                        break
+                    time.sleep(1)
+
+            if messages:
                 with open(chat_file_path, "w", encoding="utf-8") as f:
                     json.dump(messages, f, ensure_ascii=False, indent=4)
 
-        except requests.exceptions.RequestException:
-            if os.path.exists(task_file_path):
-                with open(task_file_path, "r", encoding="utf-8") as f:
-                    task_data = json.load(f)
-                chat_id = task_data.get("chatId") or task_data.get("CHAT_ID")
-            else:
-                messagebox.showerror("Błąd", "Nie masz internetu, a to zadanie nie zostało jeszcze pobrane lokalnie.")
-                return
+                self._check_and_fetch_missing_users(task_data, messages)
+                self.root.after(0, lambda: self.reload_task_window(window, task_data, messages, chat_id))
 
-            if chat_id:
-                chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json")
-                if os.path.exists(chat_file_path):
-                    with open(chat_file_path, "r", encoding="utf-8") as f:
-                        messages = json.load(f)
+        except requests.exceptions.RequestException as e:
+            print(f"Błąd podczas pobierania wiadomości czatu w tle: {e}")
 
-        if not task_data:
-            messagebox.showerror("Błąd", "Nie znaleziono szczegółów zadania.")
+    def create_task_window(self):
+        top = tk.Toplevel(self.root)
+        top.geometry("900x700")
+        top.current_cycle = 0
+        return top
+
+    def reload_task_window(self, window, task_data, messages, chat_id):
+        if not window.winfo_exists():
             return
 
-        # --- Weryfikacja brakujących ID użytkowników ---
-        required_ids = set()
-        if task_data.get("createdBy"): required_ids.add(str(task_data.get("createdBy")))
-        if task_data.get("responsibleId"): required_ids.add(str(task_data.get("responsibleId")))
+        window.current_cycle += 1
 
-        for msg in messages:
-            if msg.get("author_id"):
-                required_ids.add(str(msg.get("author_id")))
+        for widget in window.winfo_children():
+            widget.destroy()
 
-        missing_ids = [uid for uid in required_ids if uid not in self.users_map and uid != "0"]
+        self._build_task_window_ui(window, task_data, messages, chat_id)
 
-        # Odświeżenie listy użytkowników, jeśli pojawiły się nowe ID
-        if missing_ids:
-            self.fetch_all_users()
+    def _build_task_window_ui(self, window, task_data, messages, chat_id):
+        window.title(f"Zadanie #{task_data.get('id')} - {task_data.get('title')}")
 
-        self.show_task_details_window(task_data, messages, chat_id)
-
-    def show_task_details_window(self, task_data, messages, chat_id):
-        top = tk.Toplevel(self.root)
-        top.title(f"Zadanie #{task_data.get('id')} - {task_data.get('title')}")
-        top.geometry("900x700")
-
-        main_frame = tk.Frame(top, padx=10, pady=10)
+        main_frame = tk.Frame(window, padx=10, pady=10)
         main_frame.pack(fill="both", expand=True)
 
         info_label = tk.Label(main_frame, text="Szczegóły zadania:", font=("Arial", 12, "bold"))
@@ -720,10 +858,8 @@ class BitrixApp:
                 if tracker[user]["start_dt"]:
                     elapsed = (dt - tracker[user]["start_dt"]).total_seconds()
                     tracker[user]["total"] += max(0, elapsed)
-
                     if dt.date() == today_date or tracker[user]["start_dt"].date() == today_date:
                         tracker[user]["today"] += max(0, elapsed)
-
                 tracker[user]["start_dt"] = None
 
             elif finish_match:
@@ -731,14 +867,11 @@ class BitrixApp:
                     if data["start_dt"]:
                         elapsed = (dt - data["start_dt"]).total_seconds()
                         data["total"] += max(0, elapsed)
-
                         if dt.date() == today_date or data["start_dt"].date() == today_date:
                             data["today"] += max(0, elapsed)
-
                         data["start_dt"] = None
 
         active_timers = {}
-
         total_time_var = tk.StringVar()
         total_time_lbl = tk.Label(time_frame, textvariable=total_time_var, font=("Arial", 11, "bold"), fg="#2c3e50")
         total_time_lbl.pack(anchor="w", pady=(0, 10))
@@ -773,9 +906,12 @@ class BitrixApp:
                 total_time_var.set(f"Razem czas na to zadanie: {seconds_to_readable(task_time_spent)}")
 
         if active_timers:
-            self.update_live_timers(top, active_timers, total_time_var, task_time_spent)
+            self.update_live_timers(window, active_timers, total_time_var, task_time_spent, window.current_cycle)
 
         chat_label_text = f"Wiadomości (Chat ID: {chat_id}):" if chat_id else "Wiadomości (Brak podpiętego czatu):"
+        if not messages and chat_id:
+            chat_label_text += " [Synchronizowanie...]"
+
         chat_label = tk.Label(main_frame, text=chat_label_text, font=("Arial", 12, "bold"))
         chat_label.pack(anchor="w", pady=(0, 5))
 
@@ -789,8 +925,6 @@ class BitrixApp:
         if messages:
             for msg in reversed(messages):
                 author_id = str(msg.get("author_id", ""))
-
-                # Używamy mapowania użytkowników
                 if author_id and author_id != "0":
                     author_name = self.users_map.get(author_id, f"ID {author_id}")
                 else:
@@ -804,13 +938,14 @@ class BitrixApp:
                 chat_text.insert("end", f"[{date}] {author_name}:\n", "header")
                 chat_text.insert("end", f"{clean_text}\n\n")
         else:
-            chat_text.insert("end", "Brak wiadomości do wyświetlenia.")
+            chat_text.insert("end",
+                             "Brak wiadomości do wyświetlenia. Jeśli to zadanie zostało otworzone pierwszy raz, wiadomości pojawią się za chwilę automatycznie.")
 
         chat_text.tag_config("header", font=("Arial", 10, "bold"))
         chat_text.config(state="disabled")
 
-    def update_live_timers(self, window, active_timers, total_time_var, task_time_spent):
-        if not window.winfo_exists():
+    def update_live_timers(self, window, active_timers, total_time_var, task_time_spent, cycle_id):
+        if not window.winfo_exists() or getattr(window, "current_cycle", None) != cycle_id:
             return
 
         now = datetime.now(timezone(timedelta(hours=1)))
@@ -833,12 +968,12 @@ class BitrixApp:
             live_readable = seconds_to_readable(live_total_elapsed)
             grand_total_seconds = task_time_spent + live_total_elapsed
             grand_total_readable = seconds_to_readable(grand_total_seconds)
-
             total_time_var.set(f"Razem czas na to zadanie: {base_readable} + {live_readable} = {grand_total_readable}")
         else:
             total_time_var.set(f"Razem czas na to zadanie: {base_readable}")
 
-        window.after(1000, lambda: self.update_live_timers(window, active_timers, total_time_var, task_time_spent))
+        window.after(1000,
+                     lambda: self.update_live_timers(window, active_timers, total_time_var, task_time_spent, cycle_id))
 
 
 if __name__ == "__main__":
