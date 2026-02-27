@@ -4,7 +4,7 @@ import json
 import re
 import tkinter as tk
 from tkinter import ttk, messagebox
-import tkinter.font as tkfont  # Dodany moduł do mierzenia szerokości tekstu
+import tkinter.font as tkfont
 import requests
 import time
 from datetime import datetime, timezone, timedelta
@@ -74,17 +74,22 @@ class BitrixApp:
         self.all_fetched_groups = []
         self.all_responsibles = ["Wszyscy"]
 
+        # Słowniki do mapowania
+        self.groups_map = {}
+        self.users_map = {}
+
         self.current_view = tk.StringVar(value="tasks")
 
-        self.current_filter = tk.StringVar(value="Wszystkie")
+        self.current_filter = tk.StringVar(value="W trakcie")
         self.current_resp_filter = tk.StringVar(value="Wszyscy")
         self.search_var = tk.StringVar()
         self.activity_date_var = tk.StringVar()
 
+        # Usunięto kolumnę STATUS, zmieniono GROUP_ID na GROUP (dla nazw)
         self.task_columns = (
-            "ID", "TITLE", "REAL_STATUS", "STATUS", "TIME_SPENT",
+            "ID", "TITLE", "REAL_STATUS", "TIME_SPENT",
             "CREATED_BY", "RESPONSIBLE", "DEADLINE", "CREATED_DATE",
-            "CHANGED_DATE", "STATUS_CHANGED_DATE", "ACTIVITY_DATE", "GROUP_ID"
+            "CHANGED_DATE", "STATUS_CHANGED_DATE", "ACTIVITY_DATE", "GROUP"
         )
         self.group_columns = ("ID", "NAME", "DESCRIPTION", "OWNER_ID", "DATE_CREATE", "DATE_ACTIVITY")
 
@@ -149,7 +154,6 @@ class BitrixApp:
         tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical")
         tree_scroll.pack(side="right", fill="y")
 
-        # Oś X do przesuwania szerokich tabel
         tree_scroll_x = ttk.Scrollbar(tree_frame, orient="horizontal")
         tree_scroll_x.pack(side="bottom", fill="x")
 
@@ -161,20 +165,17 @@ class BitrixApp:
 
         for col in self.task_columns:
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_treeview(_col, False))
-            self.tree.column(col, width=100)  # Szerokość tymczasowa przed auto-fit
+            self.tree.column(col, width=100)
 
         self.tree.pack(side="left", fill="both", expand=True)
 
     def auto_fit_columns(self):
-        """Mierzy zawartość każdej kolumny i dynamicznie dopasowuje jej szerokość."""
         font = tkfont.nametofont("TkDefaultFont")
         columns = self.tree["columns"]
 
         for col in columns:
-            # Szerokość samego nagłówka kolumny
             max_width = font.measure(col) + 30
 
-            # Przeszukujemy wiersze dla danej kolumny
             for item in self.tree.get_children():
                 val = self.tree.set(item, col)
                 if val:
@@ -182,12 +183,11 @@ class BitrixApp:
                     if val_width > max_width:
                         max_width = val_width
 
-            # Limity zapobiegające "rozsadzeniu" tabeli przez np. opisy na 2000 znaków
-            if col in ["TITLE", "NAME", "DESCRIPTION"]:
-                max_width = min(max_width, 500)  # Szerszy limit dla głównych kolumn
+            if col in ["TITLE", "NAME", "DESCRIPTION", "GROUP"]:
+                max_width = min(max_width, 500)
                 self.tree.column(col, width=max_width, minwidth=max_width, stretch=True)
             else:
-                max_width = min(max_width, 250)  # Standardowy limit
+                max_width = min(max_width, 250)
                 self.tree.column(col, width=max_width, minwidth=max_width, stretch=False)
 
     def switch_view(self):
@@ -218,7 +218,53 @@ class BitrixApp:
 
             self.display_groups(self.all_fetched_groups)
 
+    def build_groups_map(self):
+        self.groups_map = {str(g.get("ID")): g.get("NAME") for g in self.all_fetched_groups}
+
+    def fetch_all_users(self):
+        full_url = f"{WEBHOOK_URL}user.get.json"
+        all_users = {}
+        start = 0
+
+        try:
+            while True:
+                response = requests.get(f"{full_url}?start={start}", timeout=10)
+                response.raise_for_status()
+                data = response.json()
+
+                if "result" not in data:
+                    break
+
+                for u in data["result"]:
+                    uid = str(u.get("ID"))
+                    name = f"{u.get('NAME', '')} {u.get('LAST_NAME', '')}".strip()
+                    all_users[uid] = name
+
+                if "next" in data:
+                    start = data["next"]
+                else:
+                    break
+
+            self.users_map = all_users
+            users_path = os.path.join(self.data_dir, "users_list.json")
+            with open(users_path, "w", encoding="utf-8") as f:
+                json.dump(all_users, f, ensure_ascii=False, indent=4)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Nie udało się pobrać użytkowników: {e}")
+
     def load_local_data(self):
+        # Grupy
+        groups_path = os.path.join(self.data_dir, "groups_list.json")
+        if os.path.exists(groups_path):
+            try:
+                with open(groups_path, "r", encoding="utf-8") as f:
+                    self.all_fetched_groups = json.load(f)
+                self.build_groups_map()
+            except Exception as e:
+                print(f"Nie udało się wczytać grup: {e}")
+
+        # Zadania
         tasks_path = os.path.join(self.data_dir, "tasks_list.json")
         if os.path.exists(tasks_path):
             try:
@@ -228,13 +274,17 @@ class BitrixApp:
             except Exception as e:
                 print(f"Nie udało się wczytać zadań: {e}")
 
-        groups_path = os.path.join(self.data_dir, "groups_list.json")
-        if os.path.exists(groups_path):
+        # Użytkownicy (pobierz jeśli nie ma pliku)
+        users_path = os.path.join(self.data_dir, "users_list.json")
+        if os.path.exists(users_path):
             try:
-                with open(groups_path, "r", encoding="utf-8") as f:
-                    self.all_fetched_groups = json.load(f)
+                with open(users_path, "r", encoding="utf-8") as f:
+                    self.users_map = json.load(f)
             except Exception as e:
-                print(f"Nie udało się wczytać grup: {e}")
+                print(f"Nie udało się wczytać użytkowników: {e}")
+                self.fetch_all_users()
+        else:
+            self.fetch_all_users()
 
         self.switch_view()
 
@@ -289,6 +339,7 @@ class BitrixApp:
                     break
 
             self.all_fetched_groups = all_groups
+            self.build_groups_map()
             self.display_groups(all_groups)
 
             file_path = os.path.join(self.data_dir, "groups_list.json")
@@ -317,10 +368,7 @@ class BitrixApp:
                 format_date(group.get("DATE_ACTIVITY"))
             ))
 
-        # Wymuszenie domyślnego sortowania grup po kolumnie DATE_ACTIVITY malejąco
         self.sort_treeview("DATE_ACTIVITY", reverse=True)
-
-        # Dopasowanie kolumn po wczytaniu grup
         self.auto_fit_columns()
 
     def handle_main_action(self):
@@ -447,7 +495,7 @@ class BitrixApp:
         selected_status = self.current_filter.get()
         typed_resp = self.current_resp_filter.get().strip().lower()
         search_term = self.search_var.get().strip().lower()
-        filter_date = self.activity_date_var.get().strip()  # Pobranie daty do filtra
+        filter_date = self.activity_date_var.get().strip()
 
         filtered_tasks = []
         for task in self.all_fetched_tasks:
@@ -461,7 +509,6 @@ class BitrixApp:
 
             task_title = (task.get("TITLE") or task.get("title", "")).lower()
 
-            # Formatowanie daty aktywności do porównania
             activity_date_raw = task.get("ACTIVITY_DATE") or task.get("activityDate") or ""
             activity_date_str = format_date(activity_date_raw)
 
@@ -473,7 +520,6 @@ class BitrixApp:
             else:
                 match_resp = typed_resp in resp_name.lower()
 
-            # Porównanie dat - wyświetla starsze/równe temu co w filtrze
             match_activity = True
             if filter_date and len(filter_date) >= 4:
                 match_activity = activity_date_str >= filter_date
@@ -492,10 +538,7 @@ class BitrixApp:
             title = task.get("TITLE") or task.get("title")
 
             r_status = str(task.get("REAL_STATUS") or task.get("status", ""))
-            status = str(task.get("STATUS") or task.get("status", ""))
-
             real_status_text = STATUS_MAP.get(r_status, r_status)
-            status_text = STATUS_MAP.get(status, status)
 
             time_spent = seconds_to_readable(task.get("TIME_SPENT_IN_LOGS") or task.get("timeSpentInLogs", 0))
 
@@ -511,17 +554,18 @@ class BitrixApp:
             created = format_date(task.get("CREATED_DATE") or task.get("createdDate"))
             changed = format_date(task.get("CHANGED_DATE") or task.get("changedDate"))
             status_changed = format_date(task.get("STATUS_CHANGED_DATE") or task.get("statusChangedDate"))
-            g_id = task.get("GROUP_ID") or task.get("groupId")
 
-            # NOWE: Pobranie i sformatowanie daty aktywności
+            g_id = str(task.get("GROUP_ID") or task.get("groupId") or "")
+            group_name = self.groups_map.get(g_id, g_id) if g_id else ""
+
             activity_date = format_date(task.get("ACTIVITY_DATE") or task.get("activityDate"))
 
+            # Nie wstawiamy już status_text (kolumny STATUS)
             self.tree.insert("", "end", values=(
-                t_id, title, real_status_text, status_text, time_spent,
-                c_by, resp, deadline, created, changed, status_changed, activity_date, g_id
+                t_id, title, real_status_text, time_spent,
+                c_by, resp, deadline, created, changed, status_changed, activity_date, group_name
             ))
 
-        # Zmiana sortowania na domyślne po ACTIVITY_DATE (zamiast STATUS_CHANGED_DATE)
         if self.current_view.get() == "tasks":
             self.sort_treeview("ACTIVITY_DATE", reverse=True)
 
@@ -554,8 +598,6 @@ class BitrixApp:
 
             if chat_id:
                 chat_file_path = os.path.join(self.data_dir, "chats", f"chat_{chat_id}.json")
-
-                # --- GŁÓWNA, POPRAWNA LOGIKA POBIERANIA (LAST_ID) ---
                 last_id = None
 
                 while True:
@@ -585,8 +627,6 @@ class BitrixApp:
                     json.dump(messages, f, ensure_ascii=False, indent=4)
 
         except requests.exceptions.RequestException:
-            # --- TRYB OFFLINE (Brak internetu) ---
-            # Tutaj wyłącznie wczytujemy pliki z dysku, żadnych zapytań requests!
             if os.path.exists(task_file_path):
                 with open(task_file_path, "r", encoding="utf-8") as f:
                     task_data = json.load(f)
@@ -604,6 +644,21 @@ class BitrixApp:
         if not task_data:
             messagebox.showerror("Błąd", "Nie znaleziono szczegółów zadania.")
             return
+
+        # --- Weryfikacja brakujących ID użytkowników ---
+        required_ids = set()
+        if task_data.get("createdBy"): required_ids.add(str(task_data.get("createdBy")))
+        if task_data.get("responsibleId"): required_ids.add(str(task_data.get("responsibleId")))
+
+        for msg in messages:
+            if msg.get("author_id"):
+                required_ids.add(str(msg.get("author_id")))
+
+        missing_ids = [uid for uid in required_ids if uid not in self.users_map and uid != "0"]
+
+        # Odświeżenie listy użytkowników, jeśli pojawiły się nowe ID
+        if missing_ids:
+            self.fetch_all_users()
 
         self.show_task_details_window(task_data, messages, chat_id)
 
@@ -623,14 +678,12 @@ class BitrixApp:
         desc_text.config(state="disabled")
         desc_text.pack(fill="x", pady=(0, 10))
 
-        # --- SEKCJA: ŚLEDZENIE CZASU ---
         time_frame = tk.LabelFrame(main_frame, text="Raport czasu pracy", font=("Arial", 11, "bold"), padx=10, pady=5)
         time_frame.pack(fill="x", pady=(0, 15))
 
         task_time_spent = int(task_data.get("TIME_SPENT_IN_LOGS") or task_data.get("timeSpentInLogs") or 0)
 
         tracker = {}
-
         today_date = datetime.now(timezone(timedelta(hours=1))).date()
 
         for msg in reversed(messages):
@@ -722,7 +775,6 @@ class BitrixApp:
         if active_timers:
             self.update_live_timers(top, active_timers, total_time_var, task_time_spent)
 
-        # --- SEKCJA: CZAT ---
         chat_label_text = f"Wiadomości (Chat ID: {chat_id}):" if chat_id else "Wiadomości (Brak podpiętego czatu):"
         chat_label = tk.Label(main_frame, text=chat_label_text, font=("Arial", 12, "bold"))
         chat_label.pack(anchor="w", pady=(0, 5))
@@ -736,13 +788,20 @@ class BitrixApp:
 
         if messages:
             for msg in reversed(messages):
-                author = msg.get("author_id", "System" if not msg.get("author_id") else msg.get("author_id"))
+                author_id = str(msg.get("author_id", ""))
+
+                # Używamy mapowania użytkowników
+                if author_id and author_id != "0":
+                    author_name = self.users_map.get(author_id, f"ID {author_id}")
+                else:
+                    author_name = "System"
+
                 text = msg.get("text", "")
                 date = format_date(msg.get("date"))
 
                 clean_text = re.sub(r"\[USER=\d+\](.*?)\[/USER\]", r"\1", text)
 
-                chat_text.insert("end", f"[{date}] Użytkownik {author}:\n", "header")
+                chat_text.insert("end", f"[{date}] {author_name}:\n", "header")
                 chat_text.insert("end", f"{clean_text}\n\n")
         else:
             chat_text.insert("end", "Brak wiadomości do wyświetlenia.")
