@@ -8,6 +8,8 @@ from tkinter import ttk, messagebox
 import tkinter.font as tkfont
 import requests
 import time
+from PIL import Image, ImageTk, ImageDraw
+import io
 from datetime import datetime, timezone, timedelta
 
 # Konfiguracja
@@ -71,6 +73,7 @@ def get_data_dir():
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(os.path.join(data_dir, "details"), exist_ok=True)
     os.makedirs(os.path.join(data_dir, "chats"), exist_ok=True)
+    os.makedirs(os.path.join(data_dir, "photos"), exist_ok=True)
     return data_dir
 
 
@@ -117,12 +120,16 @@ def parse_to_aware_datetime(date_string):
 
 
 def days_since(date_string):
-    """Zwraca liczbę dni od daty, lub None."""
+    """Zwraca liczbę dni kalendarzowych od daty (od północy), lub None."""
     if not date_string:
         return None
     try:
-        dt = datetime.strptime(date_string, "%Y-%m-%d %H:%M")
-        return (datetime.now() - dt).days
+        # Konwertujemy string na obiekt datetime, a następnie pobieramy samą datę (.date())
+        dt = datetime.strptime(date_string, "%Y-%m-%d %H:%M").date()
+        today = datetime.now().date()
+
+        # Różnica między samymi datami zadziała zgodnie z kalendarzem
+        return (today - dt).days
     except:
         return None
 
@@ -239,8 +246,9 @@ class TaskCardView(tk.Frame):
     CARD_PAD = 12
     CARD_GAP = 10
 
-    def __init__(self, master, on_open_cb, **kwargs):
+    def __init__(self, master, app, on_open_cb, **kwargs):
         super().__init__(master, bg=C["bg"], **kwargs)
+        self.app = app
         self.on_open_cb = on_open_cb
         self._tasks = []
         self._timer_refs = {}  # item_id -> {"var": StringVar, "base": int, "start_dt": datetime}
@@ -316,16 +324,17 @@ class TaskCardView(tk.Frame):
             resp = f"{r.get('name', '')} {r.get('lastName', '')}".strip()
 
         # Uczestnicy
-        parts = []
+        participants_info = []
         acc = task.get("accomplicesData")
         if isinstance(acc, dict):
             for uid, ud in acc.items():
                 if isinstance(ud, dict) and ud.get("name"):
-                    parts.append(ud["name"])
+                    participants_info.append((str(uid), ud["name"]))
         elif isinstance(acc, list):
             for ud in acc:
                 if isinstance(ud, dict) and ud.get("name"):
-                    parts.append(ud["name"])
+                    uid = str(ud.get("id", ""))
+                    participants_info.append((uid, ud["name"]))
 
         # Czas
         raw_time = task.get("TIME_SPENT_IN_LOGS") or task.get("timeSpentInLogs")
@@ -351,15 +360,51 @@ class TaskCardView(tk.Frame):
         card.pack_propagate(False)
         card.pack(fill="both", expand=True, padx=1, pady=1)
 
-        # ── Wnętrze z paddingiem ───────────────────────────────────────────
+        # ── Wnętrze z paddingiem
         inner = tk.Frame(card, bg=C["card"], padx=self.CARD_PAD, pady=8)
         inner.pack(fill="both", expand=True)
 
-        # ─ Wiersz 1: ID + status aktywności ──────────────────────────────
+        # ─ Wiersz 1: ID + Twórca + status aktywności ──────────────────────────────
         r1 = tk.Frame(inner, bg=C["card"])
         r1.pack(fill="x")
+
+        # ID Zadania
         tk.Label(r1, text=f"#{t_id}", bg=C["card"], fg=C["text_muted"],
-                 font=FONT_SMALL).pack(side="left")
+                 font=FONT_SMALL).pack(side="left", padx=(0, 6))
+
+        # --- Pobieranie Twórcy ---
+        creator_name = f"{task.get('CREATED_BY_NAME', '')} {task.get('CREATED_BY_LAST_NAME', '')}".strip()
+        creator_id = str(task.get("CREATED_BY") or "")
+
+        # Fallback (gdyby Bitrix zwrócił inne pola)
+        if not creator_name and 'creator' in task:
+            c = task['creator']
+            creator_name = f"{c.get('name', '')} {c.get('lastName', '')}".strip()
+            if not creator_id:
+                creator_id = str(c.get('id', ''))
+
+        creator_photo = None
+        if creator_id and creator_id in self.app.users_map:
+            user_data = self.app.users_map[creator_id]
+            if isinstance(user_data, dict):
+                creator_photo = self.app.get_user_avatar(creator_id, user_data.get("photo"))
+
+        # --- Rysowanie Twórcy obok ID ---
+        if creator_name:
+            c_f = tk.Frame(r1, bg=C["card"])
+            c_f.pack(side="left")
+
+            if creator_photo:
+                tk.Label(c_f, image=creator_photo, bg=C["card"]).pack(side="left")
+            else:
+                tk.Label(c_f, text="👤", bg=C["card"], fg=C["text_muted"], font=FONT_SMALL).pack(side="left")
+
+            # Skracamy imię twórcy by nie nachodziło na status po prawej stronie
+            disp_c_name = creator_name if len(creator_name) <= 15 else creator_name[:12] + "..."
+            tk.Label(c_f, text=disp_c_name, bg=C["card"], fg=C["text_muted"], font=FONT_SMALL).pack(side="left",
+                                                                                                    padx=(4, 0))
+
+        # --- Status Aktywności ---
         if is_running:
             dot = tk.Label(r1, text="● W trakcie", bg=C["card"],
                            fg=C["btn_green"], font=FONT_SMALL)
@@ -381,23 +426,73 @@ class TaskCardView(tk.Frame):
         if resp:
             rr = tk.Frame(inner, bg=C["card"])
             rr.pack(fill="x", pady=1)
-            tk.Label(rr, text="👤", bg=C["card"], fg=C["text_muted"],
-                     font=FONT_SMALL).pack(side="left", anchor="nw")
+
+            # Pobieramy ID pracownika
+            resp_id = str(task.get("RESPONSIBLE_ID") or task.get("responsibleId") or "")
+            if not resp_id and 'responsible' in task:
+                resp_id = str(task['responsible'].get('id', ''))
+
+            resp_photo = None
+            if resp_id and resp_id in self.app.users_map:
+                user_data = self.app.users_map[resp_id]
+                if isinstance(user_data, dict):
+                    resp_photo = self.app.get_user_avatar(resp_id, user_data.get("photo"))
+
+            # Wstawiamy zdjęcie lub standardową ikonę
+            if resp_photo:
+                tk.Label(rr, image=resp_photo, bg=C["card"]).pack(side="left", anchor="nw", pady=(1, 0))
+            else:
+                tk.Label(rr, text="👤", bg=C["card"], fg=C["text_muted"],
+                         font=FONT_SMALL).pack(side="left", anchor="nw")
+
             disp = resp if len(resp) <= 28 else resp[:25] + "..."
             tk.Label(rr, text=disp, bg=C["card"], fg=C["text"],
                      font=FONT_SMALL).pack(side="left", padx=3, anchor="nw")
 
-        # ─ Uczestnicy
-        if parts:
-            pr = tk.Frame(inner, bg=C["card"])
-            pr.pack(fill="x", pady=1)
-            tk.Label(pr, text="👥", bg=C["card"], fg=C["text_muted"],
-                     font=FONT_SMALL).pack(side="left", anchor="nw")
-            parts_txt = ", ".join(parts)
+            # ─ Uczestnicy
+            if participants_info:
+                pr = tk.Frame(inner, bg=C["card"])
+                pr.pack(fill="x", pady=2)
 
-            max_text_width = self.CARD_W - 2 * self.CARD_PAD - 30
-            tk.Label(pr, text=parts_txt, bg=C["card"], fg=C["text_muted"],
-                     font=FONT_SMALL, justify="left", wraplength=max_text_width).pack(side="left", padx=3, anchor="nw")
+                # Główna ikona uczestników (przyklejona do lewego górnego rogu)
+                tk.Label(pr, text="👥", bg=C["card"], fg=C["text_muted"],
+                         font=FONT_SMALL).pack(side="left", anchor="nw")
+
+                # Kontener na pionową listę uczestników
+                p_sub = tk.Frame(pr, bg=C["card"])
+                p_sub.pack(side="left", fill="x", padx=3)
+
+                # Ograniczamy widoczność, by nie rozepchać kafelka w dół (np. do max 3 osób)
+                limit = 3
+                displayed = participants_info[:limit]
+
+                for p_id, p_name in displayed:
+                    p_photo = None
+                    if p_id and p_id in self.app.users_map:
+                        user_data = self.app.users_map[p_id]
+                        if isinstance(user_data, dict):
+                            p_photo = self.app.get_user_avatar(p_id, user_data.get("photo"))
+
+                    # Każdy użytkownik to osobny wiersz układany od góry (side="top")
+                    u_f = tk.Frame(p_sub, bg=C["card"])
+                    u_f.pack(side="top", anchor="w", pady=(0, 3))
+
+                    # Ikona lub zdjęcie
+                    if p_photo:
+                        tk.Label(u_f, image=p_photo, bg=C["card"]).pack(side="left")
+                    else:
+                        tk.Label(u_f, text="👤", bg=C["card"], fg=C["text_muted"], font=FONT_SMALL).pack(side="left")
+
+                    # Imię pracownika (mamy teraz więcej miejsca, więc tniemy dopiero po np. 28 znakach)
+                    disp_name = p_name if len(p_name) <= 28 else p_name[:25] + "..."
+
+                    tk.Label(u_f, text=disp_name, bg=C["card"], fg=C["text_muted"],
+                             font=FONT_SMALL).pack(side="left", padx=(4, 0))
+
+                # Jeśli jest ich więcej niż limit, dodajemy na dole informację "+ X innych"
+                if len(participants_info) > limit:
+                    tk.Label(p_sub, text=f"+ {len(participants_info) - limit} innych",
+                             bg=C["card"], fg=C["accent"], font=FONT_SMALL).pack(side="top", anchor="w", padx=(2, 0))
 
         # ─ Deadline
         if deadline:
@@ -730,6 +825,17 @@ class BitrixApp:
         self.search_entry.pack(side="left")
         self.search_entry.bind("<KeyRelease>", self.apply_filter)
 
+        # --- NOWY PRZYCISK RESETOWANIA FILTRÓW ---
+        self.btn_reset = tk.Button(
+            self.filter_frame, text="✖ Reset",
+            bg=C["sidebar"], fg=C["text_muted"],
+            font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
+            padx=8, pady=2,
+            activebackground=C["btn_red"], activeforeground="#FFF",
+            command=self.reset_filters
+        )
+        self.btn_reset.pack(side="left", padx=(8, 0))
+
         # Licznik zadań
         self.count_var = tk.StringVar(value="")
         count_bar = tk.Frame(self.root, bg=C["bg"], pady=4)
@@ -770,7 +876,7 @@ class BitrixApp:
         self.tree.pack(side="left", fill="both", expand=True)
 
         # Siatka kafelków (dla "W trakcie")
-        self.card_view = TaskCardView(self.content_frame, on_open_cb=self._open_task_by_id)
+        self.card_view = TaskCardView(self.content_frame, app=self, on_open_cb=self._open_task_by_id)
         # Na początku ukryta
 
         self._card_mode = False
@@ -949,7 +1055,9 @@ class BitrixApp:
                 for u in data["result"]:
                     uid = str(u.get("ID"))
                     name = f"{u.get('NAME', '')} {u.get('LAST_NAME', '')}".strip()
-                    all_users[uid] = name
+                    photo = u.get("PERSONAL_PHOTO")
+                    print(photo)
+                    all_users[uid] = {"name": name, "photo": photo}
                 if "next" in data:
                     start = data["next"]
                 else:
@@ -982,7 +1090,57 @@ class BitrixApp:
         else:
             self.fetch_all_users()
 
+        users_path = os.path.join(self.data_dir, "users_list.json")
+        if os.path.exists(users_path):
+            try:
+                with open(users_path, "r", encoding="utf-8") as f:
+                    loaded_users = json.load(f)
+                    if loaded_users and isinstance(list(loaded_users.values())[0], str):
+                        self.users_map = {k: {"name": v, "photo": None} for k, v in loaded_users.items()}
+                    else:
+                        self.users_map = loaded_users
+            except Exception:
+                self.fetch_all_users()
+
         self.switch_view()
+
+    def get_user_avatar(self, uid, url, size=20):
+        if not hasattr(self, '_photo_cache'):
+            self._photo_cache = {}
+
+        if not url:
+            return None
+
+        cache_key = f"{uid}_{size}"
+        if cache_key in self._photo_cache:
+            return self._photo_cache[cache_key]
+
+        local_path = os.path.join(self.data_dir, "photos", f"{uid}.png")
+        try:
+            # Ładujemy z dysku lub pobieramy
+            if os.path.exists(local_path):
+                img = Image.open(local_path)
+            else:
+                resp = requests.get(url, timeout=3)
+                img = Image.open(io.BytesIO(resp.content))
+                img.save(local_path)
+
+            # Skalujemy
+            img = img.resize((size, size), Image.Resampling.LANCZOS)
+
+            # Wycianamy idealne kółeczko
+            mask = Image.new('L', (size, size), 0)
+            draw = ImageDraw.Draw(mask)
+            draw.ellipse((0, 0, size, size), fill=255)
+
+            output = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            output.paste(img, (0, 0), mask)
+
+            photo = ImageTk.PhotoImage(output)
+            self._photo_cache[cache_key] = photo
+            return photo
+        except Exception:
+            return None
 
     def sort_treeview(self, col, reverse):
         data = [(self.tree.set(child, col), child) for child in self.tree.get_children("")]
@@ -1383,6 +1541,29 @@ class BitrixApp:
             if self._card_mode:
                 self._show_tree()
             self.display_data(filtered)
+
+    def reset_filters(self):
+        """Resetuje wszystkie filtry, w tym aktywny widok konkretnej grupy roboczej."""
+
+        # 1. NAJWAŻNIEJSZE: Wyczyszczenie pamięci o wybranej grupie
+        self.current_group_view_id = None
+        self.current_group_view_name = None
+
+        # 2. Reset standardowych opcji (comboboxy, szukajka)
+        self.current_filter.set("W trakcie")
+        self.current_resp_filter.set("Wszyscy")
+        self.search_var.set("")
+        self.live_timer_var.set(False)
+        self.hide_inactive_var.set(False)
+
+        # 3. Wymuszenie wczytania pełnej puli zadań z pliku (skoro nie jesteśmy już w grupie)
+        self.load_tasks_from_file_based_on_filter()
+
+        # 4. Odświeżenie widoku tabeli/kafelków
+        self.apply_filter()
+
+        # Opcjonalnie: mały komunikat, że wróciliśmy do ogółu
+        self.status_var.set("Zresetowano filtry i widok grupy.")
 
     def display_data(self, tasks):
         selected_ids = [self.tree.item(item, "values")[0] for item in self.tree.selection()]
