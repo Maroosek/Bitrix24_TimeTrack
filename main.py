@@ -1056,7 +1056,7 @@ class BitrixApp:
                     uid = str(u.get("ID"))
                     name = f"{u.get('NAME', '')} {u.get('LAST_NAME', '')}".strip()
                     photo = u.get("PERSONAL_PHOTO")
-                    print(photo)
+                    #print(photo)
                     all_users[uid] = {"name": name, "photo": photo}
                 if "next" in data:
                     start = data["next"]
@@ -1835,16 +1835,48 @@ class BitrixApp:
         chat_text.pack(side="left", fill="both", expand=True)
         chat_scroll.config(command=chat_text.yview)
 
+        # Aby zdjęcia w czacie nie zniknęły (Tkinter Garbage Collector), musimy trzymać do nich referencję w oknie
+        if not hasattr(window, "chat_images"):
+            window.chat_images = []
+
         if messages:
             for msg in reversed(messages):
                 author_id = str(msg.get("author_id", ""))
-                author_name = self.users_map.get(author_id,
-                                                 f"ID {author_id}") if author_id and author_id != "0" else "System"
+
+                # --- BEZPIECZNE POBIERANIE IMIENIA I AWATARA ---
+                author_name = "System"
+                author_photo = None
+
+                if author_id and author_id != "0":
+                    user_data = self.users_map.get(author_id)
+                    if isinstance(user_data, dict):
+                        author_name = user_data.get("name", f"ID {author_id}")
+                        # Pobieramy mniejszy awatar na potrzeby czatu (np. 18x18 px)
+                        author_photo = self.get_user_avatar(author_id, user_data.get("photo"), size=18)
+                    elif isinstance(user_data, str):
+                        author_name = user_data  # Fallback w razie starych danych
+                    else:
+                        author_name = f"ID {author_id}"
+
                 text = msg.get("text", "")
                 date = format_date(msg.get("date"))
+
+                # Oczyszczanie tagów użytkowników z tekstu
                 clean_text = re.sub(r"\[USER=\d+\](.*?)\[/USER\]", r"\1", text)
-                chat_text.insert("end", f" [{date}]  {author_name}\n", "header")
+
+                # --- RYSOWANIE WIADOMOŚCI W TEXT WIDGET ---
+                chat_text.insert("end", f" [{date}]  ", "header")
+
+                if author_photo:
+                    window.chat_images.append(author_photo)  # Zapis w pamięci
+                    chat_text.image_create("end", image=author_photo)
+                    chat_text.insert("end", " ")
+                else:
+                    chat_text.insert("end", "👤 ")
+
+                chat_text.insert("end", f"{author_name}\n", "header")
                 chat_text.insert("end", f"  {clean_text}\n\n", "body")
+
         else:
             chat_text.insert("end", "Brak wiadomości. Jeśli to pierwsze otwarcie, wiadomości pojawią się za chwilę.")
 
