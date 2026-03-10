@@ -10,8 +10,8 @@ from config import C, FONT_BODY, FONT_SMALL
 # Globalna konfiguracja stylu ttk
 # ---------------------------------------------------------------------------
 
-def apply_dark_style(root: tk.Tk) -> None:
-    """Aplikuje ciemny motyw do wszystkich widżetów ttk."""
+def apply_theme_style(root: tk.Tk) -> None:
+    """Aplikuje aktualną paletę C do wszystkich widżetów ttk."""
     style = ttk.Style(root)
     style.theme_use("clam")
 

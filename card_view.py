@@ -24,19 +24,52 @@ class TaskCardView(tk.Frame):
 
     def __init__(self, master, app, on_open_cb, **kwargs):
         super().__init__(master, bg=C["bg"], **kwargs)
-        self.app        = app
+        self.app = app
         self.on_open_cb = on_open_cb
-        self._tasks     = []
+        self._tasks = []
         self._timer_refs: dict = {}  # task_id -> {var, base, start}
 
+        # --- Stan paginacji ---
+        self.page_size = 50
+        self.current_page = 1
+
+        # --- Pasek paginacji (na samym dole) ---
+        self.pagination_frame = tk.Frame(self, bg=C["bg"], pady=8)
+        self.pagination_frame.pack(side="bottom", fill="x")
+
+        self.btn_prev = tk.Button(
+            self.pagination_frame, text="◀ Poprzednia", command=self._prev_page,
+            bg=C["sidebar"], fg=C["text"], font=FONT_SMALL,
+            relief="flat", cursor="hand2", padx=10, pady=4,
+            activebackground=C["card_hover"], activeforeground=C["text"]
+        )
+        self.btn_prev.pack(side="left", padx=10)
+
+        self.lbl_page = tk.Label(
+            self.pagination_frame, text="Strona 1 z 1",
+            bg=C["bg"], fg=C["text_muted"], font=FONT_BODY
+        )
+        self.lbl_page.pack(side="left", expand=True)
+
+        self.btn_next = tk.Button(
+            self.pagination_frame, text="Następna ▶", command=self._next_page,
+            bg=C["sidebar"], fg=C["text"], font=FONT_SMALL,
+            relief="flat", cursor="hand2", padx=10, pady=4,
+            activebackground=C["card_hover"], activeforeground=C["text"]
+        )
+        self.btn_next.pack(side="right", padx=10)
+
+        # --- Obszar przewijany (Canvas) ---
         self._canvas = tk.Canvas(self, bg=C["bg"], highlightthickness=0)
-        self._vsb    = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=self._vsb.set)
+
+        # Pasek przewijania z prawej, canvas wypełnia resztę
         self._vsb.pack(side="right", fill="y")
         self._canvas.pack(side="left", fill="both", expand=True)
 
         self._inner = tk.Frame(self._canvas, bg=C["bg"])
-        self._cw    = self._canvas.create_window((0, 0), window=self._inner, anchor="nw")
+        self._cw = self._canvas.create_window((0, 0), window=self._inner, anchor="nw")
 
         self._inner.bind("<Configure>", lambda e: self._canvas.configure(
             scrollregion=self._canvas.bbox("all")))
@@ -45,19 +78,20 @@ class TaskCardView(tk.Frame):
 
         self._live = True
         self._run_timers()
-
     # ------------------------------------------------------------------
     # Publiczne API
     # ------------------------------------------------------------------
 
     def load_tasks(self, tasks: list) -> None:
-        """Ładuje i sortuje listę zadań, a następnie buduje kafelki."""
+        """Ładuje i sortuje listę zadań, a następnie buduje kafelki dla 1 strony."""
+
         def _key(t):
             raw = t.get("ACTIVITY_DATE") or t.get("activityDate") or ""
-            dt  = parse_to_aware_datetime(raw)
+            dt = parse_to_aware_datetime(raw)
             return dt.timestamp() if dt else 0
 
         self._tasks = sorted(tasks, key=_key, reverse=True)
+        self.current_page = 1  # Reset do pierwszej strony po nałożeniu filtra
         self._timer_refs.clear()
         self._build_cards()
 
@@ -90,16 +124,49 @@ class TaskCardView(tk.Frame):
             w.destroy()
         self._timer_refs.clear()
 
+        # Oblicz wycinek zadań dla obecnej strony
+        start_idx = (self.current_page - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        page_tasks = self._tasks[start_idx:end_idx]
+
+        self._update_pagination_ui()
+
         cols = self._cols()
-        for idx, task in enumerate(self._tasks):
-            col  = idx % cols
-            row  = idx // cols
+        for idx, task in enumerate(page_tasks):
+            col = idx % cols
+            row = idx // cols
             card = self._make_card(self._inner, task)
             card.grid(row=row, column=col,
                       padx=self.CARD_GAP, pady=self.CARD_GAP, sticky="nw")
 
+        # Przewiń widok na samą górę po zmianie strony
+        self._canvas.yview_moveto(0)
+
     def _relayout(self) -> None:
         if self._tasks:
+            self._build_cards()
+
+    # ------------------------------------------------------------------
+    # Paginacja
+    # ------------------------------------------------------------------
+
+    def _update_pagination_ui(self) -> None:
+        """Aktualizuje stan przycisków i etykiety strony."""
+        total_pages = max(1, (len(self._tasks) + self.page_size - 1) // self.page_size)
+        self.lbl_page.config(text=f"Strona {self.current_page} z {total_pages}")
+
+        self.btn_prev.config(state="normal" if self.current_page > 1 else "disabled")
+        self.btn_next.config(state="normal" if self.current_page < total_pages else "disabled")
+
+    def _prev_page(self) -> None:
+        if self.current_page > 1:
+            self.current_page -= 1
+            self._build_cards()
+
+    def _next_page(self) -> None:
+        total_pages = max(1, (len(self._tasks) + self.page_size - 1) // self.page_size)
+        if self.current_page < total_pages:
+            self.current_page += 1
             self._build_cards()
 
     # ------------------------------------------------------------------
@@ -260,16 +327,22 @@ class TaskCardView(tk.Frame):
             else:
                 act_color = "#F59E0B"
             ago_text = "dziś" if not days_ago else f"{days_ago}d temu"
-            tk.Label(footer, text=f"🕐 {ago_text}", bg=C["card"],
+            tk.Label(footer, text=f"🕐 Aktywność - {ago_text}", bg=C["card"],
                      fg=act_color, font=FONT_SMALL).pack(side="right")
 
-        # Rejestruj live timer dla zadań "W trakcie" z dzisiejszą aktywnością
-        if is_running:
-            act_dt = parse_to_aware_datetime(raw_activity)
-            if act_dt:
-                today = datetime.now(timezone(timedelta(hours=1))).date()
-                if act_dt.date() == today:
-                    self._timer_refs[t_id] = {"var": time_var, "base": base_time, "start": act_dt}
+            # Rejestruj live timer dla zadań "W trakcie" z dzisiejszą aktywnością
+            if is_running:
+                act_dt = parse_to_aware_datetime(raw_activity)
+                if act_dt:
+                    today = datetime.now(timezone(timedelta(hours=1))).date()
+                    if act_dt.date() == today:
+                        self._timer_refs[t_id] = {
+                            "var": time_var,
+                            "base": base_time,
+                            "start": act_dt,
+                            "resp": resp,
+                            "has_participants": bool(participants_info)
+                        }
 
         # ── Hover + klik ──────────────────────────────────────────────
         self._bind_hover_and_click(outer, card, t_id)
@@ -351,16 +424,37 @@ class TaskCardView(tk.Frame):
     # ------------------------------------------------------------------
 
     def _run_timers(self) -> None:
-        """Aktualizuje live timery co sekundę."""
+        """Aktualizuje live timery co sekundę zgodnie z regułami uczestników."""
         if not self._live:
             return
+
         now = datetime.now(timezone.utc)
+
+        # Krok 1: Znajdź najnowszą datę aktywności dla każdego pracownika (ignorując zadania z uczestnikami)
+        latest_for_resp = {}
+        for tid, data in self._timer_refs.items():
+            if not data.get("has_participants"):
+                resp = data.get("resp")
+                dt = data["start"]
+                if resp not in latest_for_resp or dt > latest_for_resp[resp]:
+                    latest_for_resp[resp] = dt
+
+        # Krok 2: Zaktualizuj czasy tylko dla odpowiednich kafelków
         for tid, data in list(self._timer_refs.items()):
-            elapsed = (now - data["start"]).total_seconds()
-            if elapsed > 0:
-                total = data["base"] + int(elapsed)
-                try:
-                    data["var"].set(f"⏱ {seconds_to_readable(total)}")
-                except tk.TclError:
-                    pass
+            should_tick = False
+
+            if data.get("has_participants"):
+                should_tick = True
+            elif data["start"] == latest_for_resp.get(data.get("resp")):
+                should_tick = True
+
+            if should_tick:
+                elapsed = (now - data["start"]).total_seconds()
+                if elapsed > 0:
+                    total = data["base"] + int(elapsed)
+                    try:
+                        data["var"].set(f"⏱ {seconds_to_readable(total)}")
+                    except tk.TclError:
+                        pass
+
         self.after(1000, self._run_timers)

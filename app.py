@@ -17,14 +17,14 @@ from PIL import Image, ImageDraw, ImageTk
 
 from config import (
     C, FONT_BODY, FONT_HEADING, FONT_MONO, FONT_SMALL, FONT_TITLE,
-    STATUS_COLORS, STATUS_MAP, WEBHOOK_URL,
+    STATUS_COLORS, STATUS_MAP, WEBHOOK_URL, apply_theme as _config_apply_theme,
 )
 from card_view import TaskCardView
 from helpers import (
     days_since, format_date, get_data_dir,
     parse_to_aware_datetime, seconds_to_readable,
 )
-from styles import ModernButton, ModernCheckbutton, apply_dark_style
+from styles import ModernButton, ModernCheckbutton, apply_theme_style
 
 
 class BitrixApp:
@@ -47,10 +47,16 @@ class BitrixApp:
         self.root = root
         self.root.title("Bitrix24 — Task Manager")
         self.root.geometry("1300x820")
-        self.root.configure(bg=C["bg"])
-        apply_dark_style(root)
 
         self.data_dir = get_data_dir()
+
+        # Motyw — wczytaj i zastosuj PRZED budowaniem UI
+        saved_cfg        = self._load_raw_config()
+        self._theme_name = saved_cfg.get("theme", "dark")
+        _config_apply_theme(self._theme_name)
+
+        self.root.configure(bg=C["bg"])
+        apply_theme_style(root)
 
         # Stan danych
         self.all_fetched_tasks:  list = []
@@ -60,14 +66,17 @@ class BitrixApp:
         self.users_map:   dict = {}
         self._photo_cache: dict = {}
 
+        # Licznik przebudowy UI — zatrzymuje stare pętle after()
+        self._ui_generation: int = 0
+
         # Zmienne UI
         self.current_view         = tk.StringVar(value="tasks")
-        self.current_filter       = tk.StringVar(value="W trakcie")
-        self.current_resp_filter  = tk.StringVar(value="Wszyscy")
-        self.search_var           = tk.StringVar()
+        self.current_filter       = tk.StringVar(value=saved_cfg.get("filter", "W trakcie"))
+        self.current_resp_filter  = tk.StringVar(value=saved_cfg.get("resp_filter", "Wszyscy"))
+        self.search_var           = tk.StringVar(value=saved_cfg.get("search", ""))
         self.live_timer_var       = tk.BooleanVar(value=False)
         self.hide_inactive_var    = tk.BooleanVar(value=False)
-        self.display_mode         = tk.StringVar(value=self._load_display_mode())
+        self.display_mode         = tk.StringVar(value=saved_cfg.get("display_mode", "cards"))
 
         # Stan sesji
         self.current_group_view_id   = None
@@ -76,9 +85,11 @@ class BitrixApp:
         self.active_tree_timers:     dict = {}
         self._card_mode              = False
 
+        self._ui_ready = False   # blokuje przedwczesne apply_filter podczas budowy
         self._build_ui()
+        self._ui_ready = True
         self.load_local_data()
-        self._run_live_timers()
+        self._run_live_timers(self._ui_generation)
         self._schedule_auto_refresh()
 
     # ==================================================================
@@ -109,6 +120,18 @@ class BitrixApp:
         self.status_var = tk.StringVar(value="")
         tk.Label(logo_strip, textvariable=self.status_var, bg=C["header"],
                  fg=C["accent"], font=("Segoe UI Italic", 9)).pack(side="right", padx=14)
+
+        # Przełącznik jasny/ciemny motyw
+        theme_icon = "Motyw jasny ☀️" if self._theme_name == "dark" else "Motyw ciemny 🌙"
+        self.btn_theme = tk.Button(
+            logo_strip, text=theme_icon,
+            bg=C["header"], fg="#94A3B8",
+            font=("Segoe UI", 11), relief="flat", bd=0, cursor="hand2",
+            padx=8, pady=4,
+            activebackground=C["header"], activeforeground=C["accent"],
+            command=self._toggle_theme,
+        )
+        self.btn_theme.pack(side="right", padx=(0, 4))
 
     # ── Toolbar ───────────────────────────────────────────────────────
 
@@ -191,7 +214,14 @@ class BitrixApp:
         return btn
 
     def _set_display_mode(self, mode: str) -> None:
+        """Przełącza tryb wyświetlania kart/listy.
+        Podczas budowy UI (_ui_ready=False) tylko zapisuje wartość zmiennej."""
         self.display_mode.set(mode)
+
+        # Aktualizacje widżetów i filtrowanie tylko gdy UI jest w pełni gotowe
+        if not getattr(self, "_ui_ready", False):
+            return
+
         self.btn_view_cards.config(
             bg=C["accent"] if mode == "cards" else C["sidebar"],
             fg="#000"       if mode == "cards" else C["text_muted"],
@@ -205,16 +235,25 @@ class BitrixApp:
             self.btn_action.pack_forget()
             self.action_separator.pack_forget()
             if hasattr(self, "chk_live_timer"):
-                self.chk_live_timer.pack_forget()
-                self.chk_hide_inactive.pack_forget()
+                try:
+                    self.chk_live_timer.pack_forget()
+                    self.chk_hide_inactive.pack_forget()
+                except tk.TclError:
+                    pass
         else:
-            self.btn_action.pack(side="left", padx=2, after=self.btn_fetch)
-            self.action_separator.pack(side="left", fill="y", padx=6, after=self.btn_action)
+            try:
+                self.btn_action.pack(side="left", padx=2, after=self.btn_fetch)
+                self.action_separator.pack(side="left", fill="y", padx=6, after=self.btn_action)
+            except tk.TclError:
+                pass
             if hasattr(self, "chk_live_timer"):
-                self.chk_live_timer.pack(side="left", padx=6)
-                self.chk_hide_inactive.pack(side="left", padx=6)
+                try:
+                    self.chk_live_timer.pack(side="left", padx=6)
+                    self.chk_hide_inactive.pack(side="left", padx=6)
+                except tk.TclError:
+                    pass
 
-        if hasattr(self, "tree_frame"):
+        if hasattr(self, "tree_frame") and hasattr(self, "card_view"):
             self.apply_filter()
 
     def _build_toolbar_row2(self, parent: tk.Frame) -> None:
@@ -225,7 +264,7 @@ class BitrixApp:
                                                 variable=self.live_timer_var, command=self.apply_filter)
         self.chk_live_timer.pack(side="left", padx=4)
 
-        self.chk_hide_inactive = ModernCheckbutton(right, "🔕 Ukryj nieaktywne >7d",
+        self.chk_hide_inactive = ModernCheckbutton(right, "🔕 Ukryj starsze >14d",
                                                    variable=self.hide_inactive_var, command=self.apply_filter)
         self.chk_hide_inactive.pack(side="left", padx=4)
 
@@ -667,30 +706,113 @@ class BitrixApp:
     def _config_path(self) -> str:
         return os.path.join(self.data_dir, "ui_config.json")
 
-    def _load_display_mode(self) -> str:
+    def _load_raw_config(self) -> dict:
+        """Wczytuje cały plik konfiguracyjny (lub pusty dict przy błędzie)."""
         try:
             p = os.path.join(get_data_dir(), "ui_config.json")
             if os.path.exists(p):
                 with open(p, "r", encoding="utf-8") as f:
-                    return json.load(f).get("display_mode", "cards")
+                    return json.load(f)
         except Exception:
             pass
-        return "cards"
+        return {}
 
-    def _save_display_mode_as_default(self) -> None:
+    def _save_config(self, extra: dict | None = None) -> None:
+        """Zapisuje bieżący stan UI do pliku konfiguracyjnego."""
         try:
             p   = self._config_path()
-            cfg = {}
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
+            cfg = self._load_raw_config()
             cfg["display_mode"] = self.display_mode.get()
+            cfg["theme"]        = self._theme_name
+            cfg["filter"]       = self.current_filter.get()
+            cfg["resp_filter"]  = self.current_resp_filter.get()
+            cfg["search"]       = self.search_var.get()
+            if extra:
+                cfg.update(extra)
             with open(p, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
-            self.btn_set_default.config(text="✓ Zapisano!", fg=C["btn_green"])
-            self.root.after(2000, lambda: self.btn_set_default.config(text="★ Domyślny", fg=C["text_muted"]))
         except Exception as e:
-            messagebox.showerror("Błąd", f"Nie udało się zapisać konfiguracji:\n{e}")
+            print(f"Nie udało się zapisać konfiguracji: {e}")
+
+    # ── Motyw ──────────────────────────────────────────────────────────
+
+    def _toggle_theme(self) -> None:
+        new_name = "light" if self._theme_name == "dark" else "dark"
+        self._apply_theme(new_name)
+
+    def _apply_theme(self, theme_name: str) -> None:
+        """Zmienia motyw, przebudowuje UI i przywraca stan filtrów."""
+        # 1. Zapamiętaj stan przed zniszczeniem widżetów
+        state = self._capture_ui_state()
+
+        # 2. Przełącz kolory
+        self._theme_name = theme_name
+        _config_apply_theme(theme_name)
+        self._save_config()
+
+        # 3. Przebuduj UI — _ui_ready=False blokuje apply_filter w trakcie budowy
+        self._ui_generation += 1   # zatrzymuje stare pętle after()
+        self._ui_ready = False
+        for w in self.root.winfo_children():
+            w.destroy()
+        self.root.configure(bg=C["bg"])
+        apply_theme_style(self.root)
+        self._build_ui()
+        self._ui_ready = True
+
+        # 4. Przywróć stan i odśwież widok (teraz UI jest gotowe)
+        self._restore_ui_state(state)
+        self.switch_view()
+        self._run_live_timers(self._ui_generation)
+
+    def _capture_ui_state(self) -> dict:
+        return {
+            "view":         self.current_view.get(),
+            "filter":       self.current_filter.get(),
+            "resp_filter":  self.current_resp_filter.get(),
+            "search":       self.search_var.get(),
+            "live_timer":   self.live_timer_var.get(),
+            "hide_inactive":self.hide_inactive_var.get(),
+            "display_mode": self.display_mode.get(),
+            "group_id":     self.current_group_view_id,
+            "group_name":   self.current_group_view_name,
+        }
+
+    def _restore_ui_state(self, state: dict) -> None:
+        """Przywraca zmienne stanu UI. Nie manipuluje bezpośrednio widżetami
+        — switch_view() wywoływany po tej metodzie zadba o poprawny układ."""
+        self.current_view.set(state["view"])
+        self.current_filter.set(state["filter"])
+        self.current_resp_filter.set(state["resp_filter"])
+        self.search_var.set(state["search"])
+        self.live_timer_var.set(state["live_timer"])
+        self.hide_inactive_var.set(state["hide_inactive"])
+        self.display_mode.set(state["display_mode"])
+        self.current_group_view_id   = state["group_id"]
+        self.current_group_view_name = state["group_name"]
+        # Zaktualizuj wygląd przycisków trybu (tylko kolory, bez pack/filter)
+        mode = state["display_mode"]
+        try:
+            self.btn_view_cards.config(
+                bg=C["accent"] if mode == "cards" else C["sidebar"],
+                fg="#000"       if mode == "cards" else C["text_muted"],
+            )
+            self.btn_view_list.config(
+                bg=C["accent"] if mode == "list" else C["sidebar"],
+                fg="#000"       if mode == "list" else C["text_muted"],
+            )
+        except tk.TclError:
+            pass
+
+    # ── Tryb widoku (karty/lista) ───────────────────────────────────────
+
+    def _load_display_mode(self) -> str:
+        return self._load_raw_config().get("display_mode", "cards")
+
+    def _save_display_mode_as_default(self) -> None:
+        self._save_config()
+        self.btn_set_default.config(text="✓ Zapisano!", fg=C["btn_green"])
+        self.root.after(2000, lambda: self.btn_set_default.config(text="★ Domyślny", fg=C["text_muted"]))
 
     # ==================================================================
     # Przełączanie widoków
@@ -710,13 +832,9 @@ class BitrixApp:
                 self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
             self.view_toggle_frame.pack(side="left", padx=2)
             self.btn_set_default.pack(side="left", padx=(4, 0))
-            if self.display_mode.get() == "cards":
-                self.btn_action.pack_forget()
-                self.action_separator.pack_forget()
-            else:
-                self.btn_action.pack(side="left", padx=2, after=self.btn_fetch)
-                self.action_separator.pack(side="left", fill="y", padx=6, after=self.btn_action)
-            self.apply_filter()
+            # _set_display_mode synchronizuje widoczność przycisków i checkboxów,
+            # a na końcu wywołuje apply_filter — wszystko już gotowe
+            self._set_display_mode(self.display_mode.get())
 
         elif mode == "groups":
             self.btn_fetch.config(text="⟳  Odśwież grupy")
@@ -776,24 +894,30 @@ class BitrixApp:
         self.apply_filter()
 
     def update_resp_filter_options(self) -> None:
+        """Odświeża listę pracowników, zachowując bieżący wybór jeśli nadal istnieje."""
+        prev_resp = self.current_resp_filter.get()  # zapamiętaj przed nadpisaniem
         workers: set = set()
         for task in self.all_fetched_tasks:
-            resp = f"{task.get('RESPONSIBLE_NAME', '')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
+            resp = f"{task.get('RESPONSIBLE_NAME', ' ')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
             if not resp and "responsible" in task:
                 r    = task["responsible"]
                 resp = f"{r.get('name', '')} {r.get('lastName', '')}".strip()
             if resp:
                 workers.add(resp)
-            creator = f"{task.get('CREATED_BY_NAME', '')} {task.get('CREATED_BY_LAST_NAME', '')}".strip()
+            creator = f"{task.get('CREATED_BY_NAME', ' ')} {task.get('CREATED_BY_LAST_NAME', '')}".strip()
             if not creator and "creator" in task:
-                creator = f"{task['creator'].get('name', '')} {task['creator'].get('lastName', '')}".strip()
+                creator = f"{task['creator'].get('name', ' ')} {task['creator'].get('lastName', '')}".strip()
             if creator:
                 workers.add(creator)
             for p in self._extract_participants(task):
                 workers.add(p)
         self.all_responsibles = ["Wszyscy"] + sorted(workers)
         self.resp_combobox.config(values=self.all_responsibles)
-        self.current_resp_filter.set("Wszyscy")
+        # Przywróć poprzedni wybór lub wróć do "Wszyscy"
+        if prev_resp in self.all_responsibles:
+            self.current_resp_filter.set(prev_resp)
+        else:
+            self.current_resp_filter.set("Wszyscy")
 
     def apply_filter(self, _event=None) -> None:
         if self.current_view.get() != "tasks":
@@ -802,19 +926,19 @@ class BitrixApp:
         typed_worker     = self.current_resp_filter.get().strip().lower()
         search_term      = self.search_var.get().strip().lower()
         hide_inactive    = self.hide_inactive_var.get()
-        threshold_date   = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+        threshold_date = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d %H:%M")
 
         filtered: list = []
         for task in self.all_fetched_tasks:
             real_status = str(task.get("REAL_STATUS") or task.get("status", ""))
             mapped      = STATUS_MAP.get(real_status, real_status)
-            resp        = f"{task.get('RESPONSIBLE_NAME', '')}{task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
+            resp = f"{task.get('RESPONSIBLE_NAME', '')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
             if not resp and "responsible" in task:
-                r    = task["responsible"]
-                resp = f"{r.get('name', '')}{r.get('lastName', '')}".strip()
-            creator = f"{task.get('CREATED_BY_NAME', '')}{task.get('CREATED_BY_LAST_NAME', '')}".strip()
+                r = task["responsible"]
+                resp = f"{r.get('name', '')} {r.get('lastName', '')}".strip()
+            creator = f"{task.get('CREATED_BY_NAME', '')} {task.get('CREATED_BY_LAST_NAME', '')}".strip()
             if not creator and "creator" in task:
-                creator = f"{task['creator'].get('name', '')}{task['creator'].get('lastName', '')}".strip()
+                creator = f"{task['creator'].get('name', '')} {task['creator'].get('lastName', '')}".strip()
             participants = " ".join(self._extract_participants(task))
             worker_pool  = f"{resp} {creator} {participants}".lower()
             task_title   = (task.get("TITLE") or task.get("title", "")).lower()
@@ -823,8 +947,7 @@ class BitrixApp:
             ok_status   = selected_status == "Wszystkie" or mapped == selected_status
             ok_title    = not search_term or search_term in task_title
             ok_worker   = typed_worker in ("wszyscy", "") or typed_worker in worker_pool
-            ok_activity = not (hide_inactive and real_status == "3" and
-                               (not activity_str or activity_str < threshold_date))
+            ok_activity = not (hide_inactive and (not activity_str or activity_str < threshold_date))
 
             if ok_status and ok_worker and ok_title and ok_activity:
                 filtered.append(task)
@@ -838,6 +961,8 @@ class BitrixApp:
             if self._card_mode:
                 self._show_tree()
             self.display_data(filtered)
+        # Zapamiętaj bieżący stan filtrów
+        self._save_config()
 
     def reset_filters(self) -> None:
         self.current_group_view_id   = None
@@ -849,6 +974,7 @@ class BitrixApp:
         self.hide_inactive_var.set(False)
         self.load_tasks_from_file_based_on_filter()
         self.apply_filter()
+        self._save_config()
         self.status_var.set("Zresetowano filtry i widok grupy.")
 
     # ==================================================================
@@ -872,12 +998,12 @@ class BitrixApp:
             except (TypeError, ValueError):
                 base_time = 0
 
-            creator = f"{task.get('CREATED_BY_NAME', '')}{task.get('CREATED_BY_LAST_NAME', '')}".strip()
+            creator = f"{task.get('CREATED_BY_NAME', '')} {task.get('CREATED_BY_LAST_NAME', '')}".strip()
             if not creator and "creator" in task:
-                creator = f"{task['creator'].get('name', '')}{task['creator'].get('lastName', '')}".strip()
-            resp = f"{task.get('RESPONSIBLE_NAME', '')}{task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
+                creator = f"{task['creator'].get('name', '')} {task['creator'].get('lastName', '')}".strip()
+            resp = f"{task.get('RESPONSIBLE_NAME', '')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
             if not resp and "responsible" in task:
-                resp = f"{task['responsible'].get('name', '')}{task['responsible'].get('lastName', '')}".strip()
+                resp = f"{task['responsible'].get('name', '')} {task['responsible'].get('lastName', '')}".strip()
 
             deadline      = format_date(task.get("DEADLINE") or task.get("deadline"))
             created       = format_date(task.get("CREATED_DATE") or task.get("createdDate"))
@@ -898,7 +1024,12 @@ class BitrixApp:
             if self.live_timer_var.get() and r_s == "3":
                 act_dt = parse_to_aware_datetime(raw_act)
                 if act_dt and act_dt.date() == datetime.now(timezone(timedelta(hours=1))).date():
-                    self.active_tree_timers[item_id] = {"base_time": base_time, "activity_dt": act_dt}
+                    self.active_tree_timers[item_id] = {
+                        "base_time": base_time,
+                        "activity_dt": act_dt,
+                        "resp": resp,
+                        "has_participants": bool(participants.strip())
+                    }
 
         for item in self.tree.get_children():
             if self.tree.item(item, "values")[0] in selected_ids:
@@ -908,19 +1039,45 @@ class BitrixApp:
         self.auto_fit_columns()
         self.count_var.set(f"{len(tasks)} zadań")
 
-    def _run_live_timers(self) -> None:
+    def _run_live_timers(self, generation: int) -> None:
+        """Tykający timer dla listy zadań — zatrzymuje się gdy generation != self._ui_generation."""
+        if generation != self._ui_generation:
+            return
+
         if self.current_view.get() == "tasks" and self.live_timer_var.get():
             now = datetime.now(timezone.utc)
+
+            # Krok 1: Znajdź najnowszą datę aktywności dla każdego pracownika (ignorując zadania z uczestnikami)
+            latest_for_resp = {}
+            for item_id, data in self.active_tree_timers.items():
+                if not data.get("has_participants"):
+                    resp = data.get("resp")
+                    dt = data["activity_dt"]
+                    if resp not in latest_for_resp or dt > latest_for_resp[resp]:
+                        latest_for_resp[resp] = dt
+
+            # Krok 2: Zaktualizuj czasy zgodnie z regułami
             for item_id, data in self.active_tree_timers.items():
                 if self.tree.exists(item_id):
-                    elapsed = (now - data["activity_dt"]).total_seconds()
-                    if elapsed > 0:
-                        total = data["base_time"] + int(elapsed)
-                        vals  = list(self.tree.item(item_id, "values"))
-                        if vals:
-                            vals[3] = seconds_to_readable(total)
-                            self.tree.item(item_id, values=vals)
-        self.root.after(1000, self._run_live_timers)
+                    should_tick = False
+
+                    # Licz zawsze, jeśli w zadaniu są uczestnicy (ktoś inny może mieć odpalony czas)
+                    if data.get("has_participants"):
+                        should_tick = True
+                    # Jeśli nie ma uczestników, licz tylko wtedy, gdy data aktywności jest tą najnowszą dla tego pracownika
+                    elif data["activity_dt"] == latest_for_resp.get(data.get("resp")):
+                        should_tick = True
+
+                    if should_tick:
+                        elapsed = (now - data["activity_dt"]).total_seconds()
+                        if elapsed > 0:
+                            total = data["base_time"] + int(elapsed)
+                            vals = list(self.tree.item(item_id, "values"))
+                            if vals:
+                                vals[3] = seconds_to_readable(total)
+                                self.tree.item(item_id, values=vals)
+
+        self.root.after(1000, lambda: self._run_live_timers(generation))
 
     # ==================================================================
     # Sortowanie Treeview
@@ -1114,11 +1271,15 @@ class BitrixApp:
                                 padx=10, pady=8, bd=1, relief="groove")
         time_lf.pack(fill="x", pady=(0, 12))
 
-        task_time = int(task_data.get("TIME_SPENT_IN_LOGS") or task_data.get("timeSpentInLogs") or 0)
-        tracker: dict = {}
-        today_date    = datetime.now(timezone(timedelta(hours=1))).date()
+        task_time  = int(task_data.get("TIME_SPENT_IN_LOGS") or task_data.get("timeSpentInLogs") or 0)
+        today_date = datetime.now(timezone(timedelta(hours=1))).date()
 
-        for msg in reversed(messages):
+        # ── Buduj listę sesji per user (najnowsza na końcu) ──────────
+        # user -> [[start_dt, stop_dt_or_None], ...]
+        user_sessions: dict = {}
+        open_starts:   dict = {}   # user -> start_dt bieżącej otwartej sesji
+
+        for msg in reversed(messages):   # odwrócone = od najstarszej
             text     = msg.get("text", "")
             raw_date = msg.get("date")
             if not raw_date:
@@ -1138,25 +1299,41 @@ class BitrixApp:
 
             if start_m:
                 user = start_m.group(1).strip()
-                tracker.setdefault(user, {"total": 0, "today": 0, "start_dt": None})
-                tracker[user]["start_dt"] = dt
+                open_starts[user] = dt
+                user_sessions.setdefault(user, []).append([dt, None])
             elif stop_m:
                 user = stop_m.group(1).strip()
-                tracker.setdefault(user, {"total": 0, "today": 0, "start_dt": None})
-                if tracker[user]["start_dt"]:
-                    elapsed               = (dt - tracker[user]["start_dt"]).total_seconds()
-                    tracker[user]["total"] += max(0, elapsed)
-                    if dt.date() == today_date or tracker[user]["start_dt"].date() == today_date:
-                        tracker[user]["today"] += max(0, elapsed)
-                tracker[user]["start_dt"] = None
+                sessions = user_sessions.get(user, [])
+                for sess in reversed(sessions):
+                    if sess[1] is None:
+                        sess[1] = dt
+                        break
+                open_starts.pop(user, None)
             elif finish_m:
-                for user, data in tracker.items():
-                    if data["start_dt"]:
-                        elapsed        = (dt - data["start_dt"]).total_seconds()
-                        data["total"] += max(0, elapsed)
-                        if dt.date() == today_date or data["start_dt"].date() == today_date:
-                            data["today"] += max(0, elapsed)
-                        data["start_dt"] = None
+                for user in list(open_starts.keys()):
+                    sessions = user_sessions.get(user, [])
+                    for sess in reversed(sessions):
+                        if sess[1] is None:
+                            sess[1] = dt
+                            break
+                open_starts.clear()
+
+        # ── Buduj tracker — tylko OSTATNIA sesja per user ────────────
+        # Osoba odpowiedzialna może aktywnie śledzić czas tylko w jednym miejscu.
+        tracker: dict = {}
+        for user, sessions in user_sessions.items():
+            if not sessions:
+                continue
+            last_start, last_stop = sessions[-1]   # najnowsza sesja
+            is_active = last_stop is None
+            if is_active:
+                tracker[user] = {"total": 0, "today": 0, "start_dt": last_start}
+            else:
+                elapsed   = max(0.0, (last_stop - last_start).total_seconds())
+                today_sec = elapsed if (
+                    last_stop.date() == today_date or last_start.date() == today_date
+                ) else 0.0
+                tracker[user] = {"total": elapsed, "today": today_sec, "start_dt": None}
 
         total_time_var = tk.StringVar()
         tk.Label(time_lf, textvariable=total_time_var, bg=C["bg"],

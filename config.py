@@ -1,5 +1,5 @@
 """
-config.py — Stałe konfiguracyjne: URL, mapy statusów, paleta kolorów, czcionki.
+config.py — Stałe konfiguracyjne: URL, mapy statusów, palety kolorów, czcionki.
 """
 import os
 
@@ -26,8 +26,8 @@ STATUS_COLORS = {
     "Odłożone":    "#EF4444",
 }
 
-# Paleta kolorów UI
-C = {
+# ── Ciemny motyw (domyślny)
+DARK_C: dict = {
     "bg":           "#0F172A",
     "sidebar":      "#1E293B",
     "card":         "#1E293B",
@@ -49,6 +49,45 @@ C = {
     "tag_text":     "#7DD3FC",
 }
 
+# ── Jasny motyw
+LIGHT_C: dict = {
+    "bg":           "#F1F5F9",
+    "sidebar":      "#E2E8F0",
+    "card":         "#FFFFFF",
+    "card_hover":   "#F8FAFC",
+    "card_border":  "#CBD5E1",
+    "header":       "#1E293B",   # topbar celowo ciemny — kontrast z białym tekstem
+    "accent":       "#0284C7",
+    "accent2":      "#7C3AED",
+    "text":         "#1E293B",
+    "text_muted":   "#64748B",
+    "text_dark":    "#94A3B8",
+    "btn_green":    "#059669",
+    "btn_blue":     "#2563EB",
+    "btn_red":      "#DC2626",
+    "input_bg":     "#FFFFFF",
+    "input_border": "#CBD5E1",
+    "divider":      "#BFDBFE",
+    "tag_bg":       "#DBEAFE",
+    "tag_text":     "#1D4ED8",
+}
+
+THEMES: dict = {
+    "dark":  DARK_C,
+    "light": LIGHT_C,
+}
+
+# C — aktywna paleta; modyfikowana w-miejscu przy zmianie motywu.
+# Wszystkie moduły importują C jako referencję do tego słownika.
+C: dict = dict(DARK_C)
+
+
+def apply_theme(name: str) -> None:
+    """Ustawia aktywną paletę C na wybrany motyw ('dark' lub 'light')."""
+    C.update(THEMES.get(name, DARK_C))
+
+
+# ── Czcionki
 FONT_TITLE   = ("Segoe UI Semibold", 11)
 FONT_BODY    = ("Segoe UI", 9)
 FONT_SMALL   = ("Segoe UI", 8)
