@@ -20,6 +20,7 @@ from config import (
     STATUS_COLORS, STATUS_MAP, WEBHOOK_URL, apply_theme as _config_apply_theme,
 )
 from card_view import TaskCardView
+from kanban_view import KanbanView
 from helpers import (
     days_since, format_date, get_data_dir,
     parse_to_aware_datetime, seconds_to_readable,
@@ -182,10 +183,12 @@ class BitrixApp:
         self.view_toggle_frame.pack(side="left", padx=2)
 
         self.btn_view_cards = self._toggle_btn(self.view_toggle_frame, "⊞ Kafelki", "cards")
-        self.btn_view_list  = self._toggle_btn(self.view_toggle_frame, "☰ Lista",   "list")
+        self.btn_view_list = self._toggle_btn(self.view_toggle_frame, "☰ Lista", "list")
+        self.btn_view_kanban = self._toggle_btn(self.view_toggle_frame, "⬛ Kanban", "kanban")
 
         self.btn_view_cards.config(command=lambda: self._set_display_mode("cards"))
-        self.btn_view_list.config(command=lambda:  self._set_display_mode("list"))
+        self.btn_view_list.config(command=lambda: self._set_display_mode("list"))
+        self.btn_view_kanban.config(command=lambda: self._set_display_mode("kanban"))
 
         self.btn_set_default = tk.Button(
             left, text="★ Domyślny",
@@ -214,24 +217,27 @@ class BitrixApp:
         return btn
 
     def _set_display_mode(self, mode: str) -> None:
-        """Przełącza tryb wyświetlania kart/listy.
+        """Przełącza tryb wyświetlania: cards / list / kanban.
         Podczas budowy UI (_ui_ready=False) tylko zapisuje wartość zmiennej."""
+        prev_mode = self.display_mode.get()
         self.display_mode.set(mode)
 
-        # Aktualizacje widżetów i filtrowanie tylko gdy UI jest w pełni gotowe
         if not getattr(self, "_ui_ready", False):
             return
 
-        self.btn_view_cards.config(
-            bg=C["accent"] if mode == "cards" else C["sidebar"],
-            fg="#000"       if mode == "cards" else C["text_muted"],
-        )
-        self.btn_view_list.config(
-            bg=C["accent"] if mode == "list" else C["sidebar"],
-            fg="#000"       if mode == "list" else C["text_muted"],
-        )
+        # Zaktualizuj wygląd przycisków przełącznika
+        for btn, val in (
+                (self.btn_view_cards, "cards"),
+                (self.btn_view_list, "list"),
+                (self.btn_view_kanban, "kanban"),
+        ):
+            btn.config(
+                bg=C["accent"] if mode == val else C["sidebar"],
+                fg="#000" if mode == val else C["text_muted"],
+            )
 
-        if mode == "cards":
+        # Pokaż/ukryj przyciski akcji i checkboksy
+        if mode == "cards" or mode == "kanban":
             self.btn_action.pack_forget()
             self.action_separator.pack_forget()
             if hasattr(self, "chk_live_timer"):
@@ -253,8 +259,47 @@ class BitrixApp:
                 except tk.TclError:
                     pass
 
-        if hasattr(self, "tree_frame") and hasattr(self, "card_view"):
-            self.apply_filter()
+        # Kanban: schowaj filtr statusu (kolumny same w sobie są filtrami statusu)
+        if hasattr(self, "status_label") and hasattr(self, "status_combobox"):
+            if mode == "kanban":
+                self.status_label.pack_forget()
+                self.status_combobox.pack_forget()
+            else:
+                try:
+                    self.status_label.pack(
+                        side="left", padx=(0, 2),
+                        before=self.resp_combobox,
+                    )
+                    self.status_combobox.pack(
+                        side="left", padx=(0, 6),
+                        before=self.resp_combobox,
+                    )
+                except tk.TclError:
+                    pass
+
+        if not hasattr(self, "tree_frame") or not hasattr(self, "card_view"):
+            return
+
+        needs_reload = False
+
+        if mode == "kanban":
+            # Zapamiętaj filtr sprzed kanbana, przełącz na "Wszystkie"
+            # i przeładuj plik — kanban potrzebuje pełnej listy zadań
+            if prev_mode != "kanban":
+                self._pre_kanban_filter = self.current_filter.get()
+            self.current_filter.set("Wszystkie")
+            needs_reload = True
+
+        elif prev_mode == "kanban":
+            # Wracamy z kanbana — przywróć poprzedni filtr i przeładuj plik
+            restored = getattr(self, "_pre_kanban_filter", "W trakcie")
+            self.current_filter.set(restored)
+            needs_reload = True
+
+        if needs_reload:
+            self.load_tasks_from_file_based_on_filter()
+
+        self.apply_filter()
 
     def _build_toolbar_row2(self, parent: tk.Frame) -> None:
         right = tk.Frame(parent, bg=C["sidebar"])
@@ -273,7 +318,8 @@ class BitrixApp:
         self.filter_frame = tk.Frame(right, bg=C["sidebar"])
         self.filter_frame.pack(side="left")
 
-        self._lbl(self.filter_frame, "Status:").pack(side="left", padx=(0, 2))
+        self.status_label = self._lbl(self.filter_frame, "Status:")
+        self.status_label.pack(side="left", padx=(0, 2))
         self.status_combobox = ttk.Combobox(
             self.filter_frame, textvariable=self.current_filter,
             values=["Wszystkie"] + list(STATUS_MAP.values()),
@@ -357,6 +403,9 @@ class BitrixApp:
         # Kafelki
         self.card_view = TaskCardView(self.content_frame, app=self, on_open_cb=self._open_task_by_id)
 
+        # Kanban
+        self.kanban_view = KanbanView(self.content_frame, app=self, on_open_cb=self._open_task_by_id)
+
     # ==================================================================
     # Helpers UI
     # ==================================================================
@@ -367,6 +416,7 @@ class BitrixApp:
     def _show_cards(self, tasks: list) -> None:
         self._card_mode = True
         self.tree_frame.pack_forget()
+        self.kanban_view.pack_forget()
         self.card_view.pack(fill="both", expand=True)
         self.card_view.load_tasks(tasks)
         self.count_var.set(f"{len(tasks)} zadań")
@@ -374,7 +424,18 @@ class BitrixApp:
     def _show_tree(self) -> None:
         self._card_mode = False
         self.card_view.pack_forget()
+        self.kanban_view.pack_forget()
         self.tree_frame.pack(fill="both", expand=True)
+
+    def _show_kanban(self, visible: bool) -> None:
+        """Pokazuje lub chowa kanban_view, sprzątając pozostałe widoki."""
+        if visible:
+            self._card_mode = False
+            self.card_view.pack_forget()
+            self.tree_frame.pack_forget()
+            self.kanban_view.pack(fill="both", expand=True)
+        else:
+            self.kanban_view.pack_forget()
 
     # ==================================================================
     # Dane lokalne
@@ -672,6 +733,7 @@ class BitrixApp:
             pass
         self.btn_view_cards.config(state=state)
         self.btn_view_list.config(state=state)
+        self.btn_view_kanban.config(state=state)
         self.btn_set_default.config(state=state)
 
     def _reset_fetch_status(self, message: str, success: bool = True) -> None:
@@ -793,14 +855,15 @@ class BitrixApp:
         # Zaktualizuj wygląd przycisków trybu (tylko kolory, bez pack/filter)
         mode = state["display_mode"]
         try:
-            self.btn_view_cards.config(
-                bg=C["accent"] if mode == "cards" else C["sidebar"],
-                fg="#000"       if mode == "cards" else C["text_muted"],
-            )
-            self.btn_view_list.config(
-                bg=C["accent"] if mode == "list" else C["sidebar"],
-                fg="#000"       if mode == "list" else C["text_muted"],
-            )
+            for btn, val in (
+                (self.btn_view_cards,  "cards"),
+                (self.btn_view_list,   "list"),
+                (self.btn_view_kanban, "kanban"),
+            ):
+                btn.config(
+                    bg=C["accent"] if mode == val else C["sidebar"],
+                    fg="#000"       if mode == val else C["text_muted"],
+                )
         except tk.TclError:
             pass
 
@@ -844,9 +907,11 @@ class BitrixApp:
             self.btn_action.pack(side="left", padx=2, after=self.btn_fetch)
             self.action_separator.pack(side="left", fill="y", padx=6, after=self.btn_action)
             self.filter_frame.pack_forget()
+            self.kanban_view.pack_forget()   # ← NOWE
             if self._card_mode:
                 self._show_tree()
             self.tree.config(columns=self.GROUP_COLUMNS)
+
             for col in self.GROUP_COLUMNS:
                 self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
             self.display_groups(self.all_fetched_groups)
@@ -955,11 +1020,17 @@ class BitrixApp:
         mode = self.display_mode.get()
         if mode == "cards":
             self.view_label_var.set(f"⊞ Kafelki — {selected_status}")
+            self._show_kanban(False)
             self._show_cards(filtered)
+        elif mode == "kanban":
+            self.view_label_var.set(f"⬛ Kanban — {selected_status}")
+            self._show_kanban(True)
+            self.kanban_view.load_tasks(filtered)
+            self.count_var.set(f"{len(filtered)} zadań")
         else:
             self.view_label_var.set(f"☰ Lista — {selected_status}")
-            if self._card_mode:
-                self._show_tree()
+            self._show_kanban(False)
+            self._show_tree()
             self.display_data(filtered)
         # Zapamiętaj bieżący stan filtrów
         self._save_config()
