@@ -607,23 +607,50 @@ class BitrixApp:
             self.root.after(0, self._on_fetch_error, e, "zadań 'W trakcie'")
 
     def _fetch_standard_tasks(self, is_auto: bool) -> None:
-        full_url  = f"{WEBHOOK_URL}task.item.list.json"
+        import os
+        tasks_path = os.path.join(self.data_dir, "tasks_list.json")
+        file_exists = os.path.exists(tasks_path)
+
+        # Jeśli plik już istnieje — pobierz tylko zadania aktywne w ciągu ostatniego miesiąca.
+        # Pierwsze uruchomienie (brak pliku) — pobiera wszystko bez filtru daty.
+        if file_exists:
+            full_url = f"{WEBHOOK_URL}tasks.task.list"
+            date_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00+01:00")
+        else:
+            full_url = f"{WEBHOOK_URL}task.item.list.json"
+            date_str = None
+
         all_tasks: list = []
-        start     = 0
+        start = 0
         try:
             while True:
-                resp = requests.get(f"{full_url}?start={start}", timeout=10)
-                resp.raise_for_status()
-                data = resp.json()
-                if "result" not in data:
-                    break
-                all_tasks.extend(data["result"])
+                if file_exists:
+                    params = {
+                        "filter[>=ACTIVITY_DATE]": date_str,
+                        "start": start,
+                    }
+                    resp = requests.get(full_url, params=params, timeout=10)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    tasks = data.get("result", {}).get("tasks", [])
+                    if not tasks:
+                        break
+                    all_tasks.extend(tasks)
+                else:
+                    resp = requests.get(f"{full_url}?start={start}", timeout=10)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if "result" not in data:
+                        break
+                    all_tasks.extend(data["result"])
+
                 self.root.after(0, lambda n=len(all_tasks): self.status_var.set(f"Pobrano {n} zadań..."))
                 if "next" in data:
                     start = data["next"]
                 else:
                     break
-            with open(os.path.join(self.data_dir, "tasks_list.json"), "w", encoding="utf-8") as f:
+
+            with open(tasks_path, "w", encoding="utf-8") as f:
                 json.dump(all_tasks, f, ensure_ascii=False, indent=4)
             self.root.after(0, self._on_fetch_tasks_success, all_tasks, is_auto)
         except requests.exceptions.RequestException as e:
@@ -1038,7 +1065,11 @@ class BitrixApp:
     def reset_filters(self) -> None:
         self.current_group_view_id   = None
         self.current_group_view_name = None
-        self.current_filter.set("W trakcie")
+        if self.display_mode.get() == "kanban":
+            self._pre_kanban_filter = "W trakcie"  # co wróci po wyjściu z kanbana
+            self.current_filter.set("Wszystkie")
+        else:
+            self.current_filter.set("W trakcie")
         self.current_resp_filter.set("Wszyscy")
         self.search_var.set("")
         self.live_timer_var.set(False)
@@ -1297,37 +1328,75 @@ class BitrixApp:
 
     def _build_task_window_ui(self, window: tk.Toplevel, task_data: dict,
                               messages: list, chat_id) -> None:
-        t_id  = task_data.get("id", "")
+        t_id = task_data.get("id", "")
         title = task_data.get("title", "")
         window.title(f"#{t_id} — {title}")
 
-        # Header
+        # ── Header (poza scrollem — zawsze widoczny) ──────────────────
         header = tk.Frame(window, bg=C["sidebar"], pady=10, padx=14)
         header.pack(fill="x")
         tk.Frame(header, bg=STATUS_COLORS.get("W trakcie", C["accent"]), width=4).pack(
             side="left", fill="y", padx=(0, 12))
-        tk.Label(header, text=f"#{t_id}", bg=C["sidebar"], fg=C["text_muted"], font=FONT_SMALL).pack(anchor="w")
+        tk.Label(header, text=f"#{t_id}", bg=C["sidebar"],
+                 fg=C["text_muted"], font=FONT_SMALL).pack(anchor="w")
         tk.Label(header, text=title, bg=C["sidebar"], fg=C["text"], font=FONT_HEADING,
                  wraplength=800, justify="left").pack(anchor="w")
         tk.Frame(window, bg=C["accent"], height=2).pack(fill="x")
 
-        main = tk.Frame(window, bg=C["bg"], padx=14, pady=12)
-        main.pack(fill="both", expand=True)
+        # ── Scrollowalny obszar treści ────────────────────────────────
+        outer = tk.Frame(window, bg=C["bg"])
+        outer.pack(fill="both", expand=True)
 
+        vsb = ttk.Scrollbar(outer, orient="vertical")
+        vsb.pack(side="right", fill="y")
+
+        canvas = tk.Canvas(outer, bg=C["bg"], highlightthickness=0,
+                           yscrollcommand=vsb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.config(command=canvas.yview)
+
+        main = tk.Frame(canvas, bg=C["bg"], padx=14, pady=12)
+        cw = canvas.create_window((0, 0), window=main, anchor="nw")
+
+        def _on_inner_configure(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(cw, width=event.width)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        main.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # Binduj scroll także na widżetach wewnątrz
+        window._scroll_canvas = canvas
+
+        # ── Treść ─────────────────────────────────────────────────────
         # Opis
-        tk.Label(main, text="Opis zadania", bg=C["bg"], fg=C["accent2"], font=FONT_TITLE).pack(anchor="w")
+        tk.Label(main, text="Opis zadania", bg=C["bg"],
+                 fg=C["accent2"], font=FONT_TITLE).pack(anchor="w")
         desc_bg = tk.Frame(main, bg=C["card"], padx=10, pady=8,
-                           highlightthickness=1, highlightbackground=C["card_border"])
-        desc_bg.pack(fill="both", expand=True, pady=(4, 12))
+                           highlightthickness=1,
+                           highlightbackground=C["card_border"])
+        desc_bg.pack(fill="x", pady=(4, 12))
+
         desc_scroll = ttk.Scrollbar(desc_bg, orient="vertical")
         desc_scroll.pack(side="right", fill="y")
-        desc_text = tk.Text(desc_bg, height=12, wrap="word", yscrollcommand=desc_scroll.set,
+
+        desc_text = tk.Text(desc_bg, height=6, wrap="word",
                             bg=C["card"], fg=C["text"], font=FONT_BODY, bd=0,
-                            relief="flat", insertbackground=C["text"])
+                            relief="flat", insertbackground=C["text"],
+                            yscrollcommand=desc_scroll.set)
+        desc_text.pack(side="left", fill="x", expand=True)
+        desc_scroll.config(command=desc_text.yview)
+
         desc_text.insert("1.0", task_data.get("description", "Brak opisu."))
         desc_text.config(state="disabled")
-        desc_text.pack(side="left", fill="both", expand=True)
-        desc_scroll.config(command=desc_text.yview)
+        # Scroll myszą na opisie → przewija opis (nie okno główne)
+        desc_text.bind("<MouseWheel>", lambda e: desc_text.yview_scroll(
+            int(-1 * (e.delta / 120)), "units") or "break")
 
         # Sekcja czasu pracy
         self._build_time_section(main, task_data, messages, window)
@@ -1342,31 +1411,35 @@ class BitrixApp:
                                 padx=10, pady=8, bd=1, relief="groove")
         time_lf.pack(fill="x", pady=(0, 12))
 
-        task_time  = int(task_data.get("TIME_SPENT_IN_LOGS") or task_data.get("timeSpentInLogs") or 0)
+        task_time = int(task_data.get("TIME_SPENT_IN_LOGS") or
+                        task_data.get("timeSpentInLogs") or 0)
         today_date = datetime.now(timezone(timedelta(hours=1))).date()
 
-        # ── Buduj listę sesji per user (najnowsza na końcu) ──────────
-        # user -> [[start_dt, stop_dt_or_None], ...]
+        # ── Parsowanie sesji ──────────────────────────────────────────
         user_sessions: dict = {}
-        open_starts:   dict = {}   # user -> start_dt bieżącej otwartej sesji
+        open_starts: dict = {}
 
-        for msg in reversed(messages):   # odwrócone = od najstarszej
-            text     = msg.get("text", "")
+        for msg in reversed(messages):
+            text = msg.get("text", "")
             raw_date = msg.get("date")
             if not raw_date:
                 continue
             try:
                 dt_obj = datetime.fromisoformat(raw_date)
-                dt     = dt_obj.astimezone(timezone(timedelta(hours=1))) if dt_obj.tzinfo else \
-                         dt_obj.replace(tzinfo=timezone(timedelta(hours=1)))
+                dt = (dt_obj.astimezone(timezone(timedelta(hours=1)))
+                      if dt_obj.tzinfo else
+                      dt_obj.replace(tzinfo=timezone(timedelta(hours=1))))
             except Exception:
                 continue
 
-            start_m  = re.search(r"\[USER=\d+\](.*?)\[/USER\]\s+włączył[a]?\s+śledzenie\s+czasu",
-                                  text, re.IGNORECASE)
-            stop_m   = re.search(r"\[USER=\d+\](.*?)\[/USER\]\s+wyłączył[a]?\s+śledzenie\s+czasu",
-                                  text, re.IGNORECASE)
-            finish_m = re.search(r"(ukończył|zakończył)[a]?\s+zadanie", text, re.IGNORECASE)
+            start_m = re.search(
+                r"\[USER=\d+\](.*?)\[/USER\]\s+włączył[a]?\s+śledzenie\s+czasu",
+                text, re.IGNORECASE)
+            stop_m = re.search(
+                r"\[USER=\d+\](.*?)\[/USER\]\s+wyłączył[a]?\s+śledzenie\s+czasu",
+                text, re.IGNORECASE)
+            finish_m = re.search(r"(ukończył|zakończył)[a]?\s+zadanie",
+                                 text, re.IGNORECASE)
 
             if start_m:
                 user = start_m.group(1).strip()
@@ -1374,64 +1447,214 @@ class BitrixApp:
                 user_sessions.setdefault(user, []).append([dt, None])
             elif stop_m:
                 user = stop_m.group(1).strip()
-                sessions = user_sessions.get(user, [])
-                for sess in reversed(sessions):
+                for sess in reversed(user_sessions.get(user, [])):
                     if sess[1] is None:
                         sess[1] = dt
                         break
                 open_starts.pop(user, None)
             elif finish_m:
                 for user in list(open_starts.keys()):
-                    sessions = user_sessions.get(user, [])
-                    for sess in reversed(sessions):
+                    for sess in reversed(user_sessions.get(user, [])):
                         if sess[1] is None:
                             sess[1] = dt
                             break
                 open_starts.clear()
 
-        # ── Buduj tracker — tylko OSTATNIA sesja per user ────────────
-        # Osoba odpowiedzialna może aktywnie śledzić czas tylko w jednym miejscu.
+        # ── Buduj tracker ze wszystkich sesji + dailyMap ──────────────
         tracker: dict = {}
         for user, sessions in user_sessions.items():
             if not sessions:
                 continue
-            last_start, last_stop = sessions[-1]   # najnowsza sesja
-            is_active = last_stop is None
-            if is_active:
-                tracker[user] = {"total": 0, "today": 0, "start_dt": last_start}
-            else:
-                elapsed   = max(0.0, (last_stop - last_start).total_seconds())
-                today_sec = elapsed if (
-                    last_stop.date() == today_date or last_start.date() == today_date
-                ) else 0.0
-                tracker[user] = {"total": elapsed, "today": today_sec, "start_dt": None}
+            total_elapsed = 0.0
+            today_elapsed = 0.0
+            is_active = False
+            active_start = None
+            daily_map: dict = {}
 
+            for start_dt, stop_dt in sessions:
+                if stop_dt is None:
+                    is_active = True
+                    active_start = start_dt
+                else:
+                    elapsed = max(0.0, (stop_dt - start_dt).total_seconds())
+                    total_elapsed += elapsed
+                    day = start_dt.date()
+                    daily_map[day] = daily_map.get(day, 0.0) + elapsed
+                    if start_dt.date() == today_date or stop_dt.date() == today_date:
+                        today_elapsed += elapsed
+
+            tracker[user] = {
+                "total": total_elapsed,
+                "today": today_elapsed,
+                "is_active": is_active,
+                "active_start": active_start,
+                "daily_map": daily_map,
+            }
+
+        # ── Wiersz sumy + live timery ─────────────────────────────────
         total_time_var = tk.StringVar()
         tk.Label(time_lf, textvariable=total_time_var, bg=C["bg"],
-                 fg=C["accent"], font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(0, 8))
+                 fg=C["accent"], font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(0, 4))
 
         active_timers: dict = {}
+
         if not tracker and task_time == 0:
             total_time_var.set("Razem: 00:00:00")
             tk.Label(time_lf, text="Brak historii czasu.", bg=C["bg"],
                      fg=C["text_muted"], font=FONT_BODY).pack(anchor="w")
         else:
             for user, data in tracker.items():
-                lbl_var   = tk.StringVar()
-                tk.Label(time_lf, textvariable=lbl_var, bg=C["bg"], fg=C["text"],
-                         font=FONT_BODY).pack(anchor="w")
-                is_active = bool(data["start_dt"] and data["start_dt"].date() == today_date)
-                today_str = f"  (dziś: {seconds_to_readable(data['today'])})" if data["today"] > 0 else ""
-                if is_active:
-                    active_timers[user] = {**data, "var": lbl_var}
+                lbl_var = tk.StringVar()
+                tk.Label(time_lf, textvariable=lbl_var, bg=C["bg"],
+                         fg=C["text"], font=FONT_BODY).pack(anchor="w")
+                is_act = (data["is_active"] and data["active_start"] and
+                          data["active_start"].date() == today_date)
+                today_str = (f"  (dziś: {seconds_to_readable(data['today'])})"
+                             if data["today"] > 0 else "")
+                if is_act:
+                    active_timers[user] = {
+                        "total": data["total"],
+                        "today": data["today"],
+                        "start_dt": data["active_start"],
+                        "var": lbl_var,
+                    }
                 else:
-                    lbl_var.set(f"👤 {user}  {seconds_to_readable(data['total'])}{today_str}")
+                    lbl_var.set(
+                        f"👤 {user}  {seconds_to_readable(data['total'])}{today_str}")
             if not active_timers:
                 total_time_var.set(f"Razem: {seconds_to_readable(task_time)}")
 
         if active_timers:
-            self.update_live_timers(window, active_timers, total_time_var, task_time, window.current_cycle)
+            self.update_live_timers(window, active_timers, total_time_var,
+                                    task_time, window.current_cycle)
 
+        # ── Przycisk rozwijania raportu dziennego ─────────────────────
+        has_daily = any(data["daily_map"] for data in tracker.values())
+        if has_daily:
+            toggle_var = tk.BooleanVar(value=False)
+
+            btn_row = tk.Frame(time_lf, bg=C["bg"])
+            btn_row.pack(anchor="w", pady=(6, 0))
+
+            detail_frame = tk.Frame(time_lf, bg=C["bg"])
+
+            # detail_frame nie jest pakowany od razu — pojawi się po kliknięciu
+
+            def _toggle_details():
+                if toggle_var.get():
+                    detail_frame.pack(fill="x", pady=(6, 0))
+                    btn_toggle.config(text="▲ Ukryj zestawienie dzienne")
+                else:
+                    detail_frame.pack_forget()
+                    btn_toggle.config(text="▼ Pokaż zestawienie dzienne")
+                # Odśwież scrollregion okna po zmianie rozmiaru
+                try:
+                    canvas = getattr(window, "_scroll_canvas", None)
+                    if canvas:
+                        canvas.update_idletasks()
+                        canvas.configure(scrollregion=canvas.bbox("all"))
+                except Exception:
+                    pass
+
+            btn_toggle = tk.Button(
+                btn_row,
+                text="▼ Pokaż zestawienie dzienne",
+                bg=C["sidebar"], fg=C["accent"],
+                font=FONT_SMALL, relief="flat", bd=0, cursor="hand2",
+                padx=8, pady=4,
+                activebackground=C["card_hover"],
+                activeforeground=C["accent"],
+                command=lambda: (toggle_var.set(not toggle_var.get()),
+                                 _toggle_details()),
+            )
+            btn_toggle.pack(side="left")
+
+            self._build_daily_breakdown(detail_frame, tracker)
+
+    # ------------------------------------------------------------------
+
+    def _build_daily_breakdown(self, parent: tk.Frame, tracker: dict) -> None:
+        """Tabela per user × per dzień."""
+        all_days: set = set()
+        for data in tracker.values():
+            all_days.update(data["daily_map"].keys())
+        if not all_days:
+            return
+
+        sorted_days = sorted(all_days, reverse=True)
+        users = list(tracker.keys())
+        show_sum = len(users) > 1
+        today = datetime.now(timezone(timedelta(hours=1))).date()
+
+        tk.Label(parent, text="📅 Zestawienie dzienne",
+                 bg=C["bg"], fg=C["accent2"], font=FONT_TITLE).pack(
+            anchor="w", pady=(0, 6))
+
+        tbl = tk.Frame(parent, bg=C["bg"])
+        tbl.pack(anchor="w")
+
+        def cell(row, col, text, fg, bg=C["card"], bold=False):
+            font = ("Segoe UI Semibold", 8) if bold else FONT_SMALL
+            tk.Label(tbl, text=text, bg=bg, fg=fg, font=font,
+                     width=13, anchor="center" if col > 0 else "w",
+                     padx=6, pady=3,
+                     highlightthickness=1,
+                     highlightbackground=C["card_border"],
+                     ).grid(row=row, column=col, sticky="nsew",
+                            padx=(0, 1), pady=(0, 1))
+
+        # Nagłówek
+        cell(0, 0, "Data", C["text_muted"], bold=True)
+        for ci, u in enumerate(users, 1):
+            disp = u if len(u) <= 16 else u[:13] + "…"
+            cell(0, ci, disp, C["text_muted"], bold=True)
+        if show_sum:
+            cell(0, len(users) + 1, "Suma", C["accent"], bold=True)
+
+        # Wiersze
+        for ri, day in enumerate(sorted_days, 1):
+            if day == today:
+                day_str, day_fg, row_bg = (
+                    f"Dziś  {day.strftime('%d.%m')}",
+                    C["accent"], C["card_hover"])
+            elif day == today - timedelta(days=1):
+                day_str, day_fg, row_bg = (
+                    f"Wczoraj {day.strftime('%d.%m')}",
+                    C["text"], C["card"])
+            else:
+                day_str, day_fg, row_bg = (
+                    day.strftime("%d.%m.%Y"),
+                    C["text_muted"], C["card"])
+
+            cell(ri, 0, day_str, day_fg, row_bg)
+            day_total = 0.0
+            for ci, u in enumerate(users, 1):
+                secs = tracker[u]["daily_map"].get(day, 0.0)
+                day_total += secs
+                txt = seconds_to_readable(secs) if secs > 0 else "—"
+                fg = C["text"] if secs > 0 else C["text_muted"]
+                tk.Label(tbl, text=txt, bg=row_bg, fg=fg,
+                         font=FONT_MONO, width=13, anchor="center",
+                         padx=6, pady=3,
+                         highlightthickness=1,
+                         highlightbackground=C["card_border"],
+                         ).grid(row=ri, column=ci, sticky="nsew",
+                                padx=(0, 1), pady=(0, 1))
+            if show_sum:
+                cell(ri, len(users) + 1,
+                     seconds_to_readable(day_total), C["accent"], row_bg)
+
+        # Wiersz sum
+        sr = len(sorted_days) + 1
+        cell(sr, 0, "Łącznie", C["accent"], C["sidebar"], bold=True)
+        grand = 0.0
+        for ci, u in enumerate(users, 1):
+            ut = tracker[u]["total"]
+            grand += ut
+            cell(sr, ci, seconds_to_readable(ut), C["accent"], C["sidebar"], bold=True)
+        if show_sum:
+            cell(sr, len(users) + 1,
+                 seconds_to_readable(grand), C["btn_green"], C["sidebar"], bold=True)
     def _build_chat_section(self, parent: tk.Frame, messages: list,
                             chat_id, window: tk.Toplevel) -> None:
         hdr = f"💬 Wiadomości (Chat ID: {chat_id})" if chat_id else "💬 Wiadomości (brak czatu)"
