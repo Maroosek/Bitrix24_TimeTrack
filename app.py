@@ -79,6 +79,9 @@ class BitrixApp:
         self.hide_inactive_var    = tk.BooleanVar(value=False)
         self.display_mode         = tk.StringVar(value=saved_cfg.get("display_mode", "cards"))
 
+        # Stan Kalendarza Grup
+        self._group_cal_mode      = False
+
         # Stan sesji
         self.current_group_view_id   = None
         self.current_group_view_name = None
@@ -176,6 +179,15 @@ class BitrixApp:
         self.action_separator = tk.Frame(left, bg=C["card_border"], width=1)
         self.action_separator.pack(side="left", fill="y", padx=6)
 
+        # Guzik Kalendarza Grup (domyślnie ukryty, pokazywany w trybie grup)
+        self.btn_group_calendar = tk.Button(
+            left, text="📅 Kalendarz życia grup",
+            bg=C.get("btn_blue", "#3B82F6"), fg="#FFFFFF",
+            font=("Segoe UI", 10, "bold"), relief="flat", bd=0, cursor="hand2",
+            padx=14, pady=4, activebackground=C["accent"], activeforeground="#000",
+            command=self.toggle_groups_calendar
+        )
+
         # Przełącznik Kafelki / Lista
         self.view_toggle_frame = tk.Frame(left, bg=C["sidebar"],
                                           highlightthickness=1,
@@ -217,8 +229,7 @@ class BitrixApp:
         return btn
 
     def _set_display_mode(self, mode: str) -> None:
-        """Przełącza tryb wyświetlania: cards / list / kanban.
-        Podczas budowy UI (_ui_ready=False) tylko zapisuje wartość zmiennej."""
+        """Przełącza tryb wyświetlania: cards / list / kanban."""
         prev_mode = self.display_mode.get()
         self.display_mode.set(mode)
 
@@ -259,7 +270,7 @@ class BitrixApp:
                 except tk.TclError:
                     pass
 
-        # Kanban: schowaj filtr statusu (kolumny same w sobie są filtrami statusu)
+        # Kanban: schowaj filtr statusu
         if hasattr(self, "status_label") and hasattr(self, "status_combobox"):
             if mode == "kanban":
                 self.status_label.pack_forget()
@@ -283,15 +294,11 @@ class BitrixApp:
         needs_reload = False
 
         if mode == "kanban":
-            # Zapamiętaj filtr sprzed kanbana, przełącz na "Wszystkie"
-            # i przeładuj plik — kanban potrzebuje pełnej listy zadań
             if prev_mode != "kanban":
                 self._pre_kanban_filter = self.current_filter.get()
             self.current_filter.set("Wszystkie")
             needs_reload = True
-
         elif prev_mode == "kanban":
-            # Wracamy z kanbana — przywróć poprzedni filtr i przeładuj plik
             restored = getattr(self, "_pre_kanban_filter", "W trakcie")
             self.current_filter.set(restored)
             needs_reload = True
@@ -417,6 +424,7 @@ class BitrixApp:
         self._card_mode = True
         self.tree_frame.pack_forget()
         self.kanban_view.pack_forget()
+        if hasattr(self, "group_cal_frame"): self.group_cal_frame.pack_forget()
         self.card_view.pack(fill="both", expand=True)
         self.card_view.load_tasks(tasks)
         self.count_var.set(f"{len(tasks)} zadań")
@@ -425,14 +433,15 @@ class BitrixApp:
         self._card_mode = False
         self.card_view.pack_forget()
         self.kanban_view.pack_forget()
+        if hasattr(self, "group_cal_frame"): self.group_cal_frame.pack_forget()
         self.tree_frame.pack(fill="both", expand=True)
 
     def _show_kanban(self, visible: bool) -> None:
-        """Pokazuje lub chowa kanban_view, sprzątając pozostałe widoki."""
         if visible:
             self._card_mode = False
             self.card_view.pack_forget()
             self.tree_frame.pack_forget()
+            if hasattr(self, "group_cal_frame"): self.group_cal_frame.pack_forget()
             self.kanban_view.pack(fill="both", expand=True)
         else:
             self.kanban_view.pack_forget()
@@ -458,7 +467,6 @@ class BitrixApp:
             try:
                 with open(users_path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
-                # Obsługa starszego formatu {uid: "name"}
                 if loaded and isinstance(list(loaded.values())[0], str):
                     self.users_map = {k: {"name": v, "photo": None} for k, v in loaded.items()}
                 else:
@@ -489,7 +497,7 @@ class BitrixApp:
         self.groups_map = {str(g.get("ID")): g.get("NAME") for g in self.all_fetched_groups}
 
     # ==================================================================
-    # Pobieranie użytkowników / awatarów
+    # API...
     # ==================================================================
 
     def fetch_all_users(self) -> None:
@@ -520,7 +528,6 @@ class BitrixApp:
             print(f"Błąd pobierania użytkowników: {e}")
 
     def get_user_avatar(self, uid: str, url: str, size: int = 20):
-        """Zwraca okrągłe zdjęcie profilowe jako PhotoImage lub None."""
         if not url:
             return None
         cache_key = f"{uid}_{size}"
@@ -534,6 +541,7 @@ class BitrixApp:
             else:
                 r   = requests.get(url, timeout=3)
                 img = Image.open(io.BytesIO(r.content))
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 img.save(local_path)
 
             img    = img.resize((size, size), Image.Resampling.LANCZOS)
@@ -548,10 +556,6 @@ class BitrixApp:
             return photo
         except Exception:
             return None
-
-    # ==================================================================
-    # Pobieranie danych z API
-    # ==================================================================
 
     def fetch_data(self, is_auto: bool = False) -> None:
         if self.is_fetching:
@@ -607,12 +611,9 @@ class BitrixApp:
             self.root.after(0, self._on_fetch_error, e, "zadań 'W trakcie'")
 
     def _fetch_standard_tasks(self, is_auto: bool) -> None:
-        import os
         tasks_path = os.path.join(self.data_dir, "tasks_list.json")
         file_exists = os.path.exists(tasks_path)
 
-        # Jeśli plik już istnieje — pobierz tylko zadania aktywne w ciągu ostatniego miesiąca.
-        # Pierwsze uruchomienie (brak pliku) — pobiera wszystko bez filtru daty.
         if file_exists:
             full_url = f"{WEBHOOK_URL}tasks.task.list"
             date_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00+01:00")
@@ -701,7 +702,7 @@ class BitrixApp:
         except Exception as e:
             self.root.after(0, self._on_filter_tasks_error, e, group_name)
 
-    # ── Callbacki zakończenia pobierania ──────────────────────────────
+    # ── Callbacki ─────────────────────────────────────────────────────
 
     def _on_fetch_tasks_success(self, all_tasks: list, is_auto: bool = False) -> None:
         self.all_fetched_tasks = all_tasks
@@ -716,7 +717,12 @@ class BitrixApp:
     def _on_fetch_groups_success(self, all_groups: list, is_auto: bool = False) -> None:
         self.all_fetched_groups = all_groups
         self.build_groups_map()
-        self.display_groups(all_groups)
+
+        if getattr(self, "_group_cal_mode", False):
+            self.display_groups_calendar(all_groups)
+        else:
+            self.display_groups(all_groups)
+
         if is_auto:
             self._reset_fetch_status(f"Odświeżono ({datetime.now().strftime('%H:%M')}).")
         else:
@@ -749,7 +755,7 @@ class BitrixApp:
                                f"Nie udało się pobrać {category}.\nPrzeglądasz dane lokalne.\nBłąd: {e}")
 
     # ==================================================================
-    # Zarządzanie stanem UI (przyciski, status)
+    # Zarządzanie stanem UI
     # ==================================================================
 
     def _toggle_buttons_state(self, state: str) -> None:
@@ -796,7 +802,6 @@ class BitrixApp:
         return os.path.join(self.data_dir, "ui_config.json")
 
     def _load_raw_config(self) -> dict:
-        """Wczytuje cały plik konfiguracyjny (lub pusty dict przy błędzie)."""
         try:
             p = os.path.join(get_data_dir(), "ui_config.json")
             if os.path.exists(p):
@@ -807,7 +812,6 @@ class BitrixApp:
         return {}
 
     def _save_config(self, extra: dict | None = None) -> None:
-        """Zapisuje bieżący stan UI do pliku konfiguracyjnego."""
         try:
             p   = self._config_path()
             cfg = self._load_raw_config()
@@ -823,24 +827,18 @@ class BitrixApp:
         except Exception as e:
             print(f"Nie udało się zapisać konfiguracji: {e}")
 
-    # ── Motyw ──────────────────────────────────────────────────────────
-
     def _toggle_theme(self) -> None:
         new_name = "light" if self._theme_name == "dark" else "dark"
         self._apply_theme(new_name)
 
     def _apply_theme(self, theme_name: str) -> None:
-        """Zmienia motyw, przebudowuje UI i przywraca stan filtrów."""
-        # 1. Zapamiętaj stan przed zniszczeniem widżetów
         state = self._capture_ui_state()
 
-        # 2. Przełącz kolory
         self._theme_name = theme_name
         _config_apply_theme(theme_name)
         self._save_config()
 
-        # 3. Przebuduj UI — _ui_ready=False blokuje apply_filter w trakcie budowy
-        self._ui_generation += 1   # zatrzymuje stare pętle after()
+        self._ui_generation += 1
         self._ui_ready = False
         for w in self.root.winfo_children():
             w.destroy()
@@ -849,7 +847,6 @@ class BitrixApp:
         self._build_ui()
         self._ui_ready = True
 
-        # 4. Przywróć stan i odśwież widok (teraz UI jest gotowe)
         self._restore_ui_state(state)
         self.switch_view()
         self._run_live_timers(self._ui_generation)
@@ -865,11 +862,10 @@ class BitrixApp:
             "display_mode": self.display_mode.get(),
             "group_id":     self.current_group_view_id,
             "group_name":   self.current_group_view_name,
+            "group_cal_mode": getattr(self, "_group_cal_mode", False),
         }
 
     def _restore_ui_state(self, state: dict) -> None:
-        """Przywraca zmienne stanu UI. Nie manipuluje bezpośrednio widżetami
-        — switch_view() wywoływany po tej metodzie zadba o poprawny układ."""
         self.current_view.set(state["view"])
         self.current_filter.set(state["filter"])
         self.current_resp_filter.set(state["resp_filter"])
@@ -879,7 +875,8 @@ class BitrixApp:
         self.display_mode.set(state["display_mode"])
         self.current_group_view_id   = state["group_id"]
         self.current_group_view_name = state["group_name"]
-        # Zaktualizuj wygląd przycisków trybu (tylko kolory, bez pack/filter)
+        self._group_cal_mode = state.get("group_cal_mode", False)
+
         mode = state["display_mode"]
         try:
             for btn, val in (
@@ -893,8 +890,6 @@ class BitrixApp:
                 )
         except tk.TclError:
             pass
-
-    # ── Tryb widoku (karty/lista) ───────────────────────────────────────
 
     def _load_display_mode(self) -> str:
         return self._load_raw_config().get("display_mode", "cards")
@@ -915,6 +910,8 @@ class BitrixApp:
         self.active_tree_timers.clear()
 
         if mode == "tasks":
+            self.btn_group_calendar.pack_forget()
+
             self.btn_fetch.config(text="⟳  Odśwież")
             self.filter_frame.pack(side="left")
             self.tree.config(columns=self.TASK_COLUMNS)
@@ -922,29 +919,39 @@ class BitrixApp:
                 self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
             self.view_toggle_frame.pack(side="left", padx=2)
             self.btn_set_default.pack(side="left", padx=(4, 0))
-            # _set_display_mode synchronizuje widoczność przycisków i checkboxów,
-            # a na końcu wywołuje apply_filter — wszystko już gotowe
             self._set_display_mode(self.display_mode.get())
 
         elif mode == "groups":
-            self.btn_fetch.config(text="⟳  Odśwież grupy")
             self.view_toggle_frame.pack_forget()
             self.btn_set_default.pack_forget()
+            self.filter_frame.pack_forget()
+            self.kanban_view.pack_forget()
+
+            self.btn_fetch.config(text="⟳  Odśwież grupy")
             self.btn_action.config(text="↗  Otwórz / Filtruj zadania")
             self.btn_action.pack(side="left", padx=2, after=self.btn_fetch)
             self.action_separator.pack(side="left", fill="y", padx=6, after=self.btn_action)
-            self.filter_frame.pack_forget()
-            self.kanban_view.pack_forget()   # ← NOWE
-            if self._card_mode:
-                self._show_tree()
-            self.tree.config(columns=self.GROUP_COLUMNS)
 
-            for col in self.GROUP_COLUMNS:
-                self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
-            self.display_groups(self.all_fetched_groups)
+            # Pokaż dedykowany guzik
+            self.btn_group_calendar.pack(side="left", padx=10, after=self.action_separator)
+
+            if self._group_cal_mode:
+                self.btn_group_calendar.config(text="☰ Wróć do listy grup", bg=C["sidebar"], fg=C["accent"])
+                self.display_groups_calendar(self.all_fetched_groups)
+            else:
+                self.btn_group_calendar.config(text="📅 Kalendarz życia grup", bg=C.get("btn_blue", "#3B82F6"), fg="#FFFFFF")
+                if hasattr(self, "group_cal_frame"):
+                    self.group_cal_frame.pack_forget()
+                if self._card_mode:
+                    self._show_tree()
+                self.tree.config(columns=self.GROUP_COLUMNS)
+
+                for col in self.GROUP_COLUMNS:
+                    self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview(c, False))
+                self.display_groups(self.all_fetched_groups)
 
     def display_groups(self, groups: list) -> None:
-        if self.current_view.get() != "groups":
+        if self.current_view.get() != "groups" or self._group_cal_mode:
             return
         if self._card_mode:
             self._show_tree()
@@ -964,7 +971,190 @@ class BitrixApp:
         self.sort_treeview("DATE_ACTIVITY", reverse=True)
         self.auto_fit_columns()
         self.count_var.set(f"{len(groups)} grup")
-        self.view_label_var.set("Widok: Grupy robocze")
+        self.view_label_var.set("Widok: Lista grup roboczych")
+
+    # ==================================================================
+    # OŚ CZASU GRUP (KALENDARZ)
+    # ==================================================================
+
+    def toggle_groups_calendar(self) -> None:
+        """Przełącza pomiędzy widokiem standardowej listy Treeview a kalendarzem dla grup."""
+        self._group_cal_mode = not getattr(self, "_group_cal_mode", False)
+        if self._group_cal_mode:
+            self.btn_group_calendar.config(text="☰ Wróć do listy grup", bg=C["sidebar"], fg=C["accent"])
+            self.display_groups_calendar(self.all_fetched_groups)
+        else:
+            self.btn_group_calendar.config(text="📅 Kalendarz życia grup", bg=C.get("btn_blue", "#3B82F6"), fg="#FFFFFF")
+            if hasattr(self, "group_cal_frame"):
+                self.group_cal_frame.pack_forget()
+            self._show_tree()
+            self.display_groups(self.all_fetched_groups)
+
+    def _toggle_cal_sort(self) -> None:
+        """Przełącza tryb sortowania kalendarza i odświeża widok."""
+        current_mode = getattr(self, "_group_cal_sort_mode", "activity")
+        if current_mode == "activity":
+            self._group_cal_sort_mode = "start"
+        else:
+            self._group_cal_sort_mode = "activity"
+        self.display_groups_calendar(self.all_fetched_groups)
+
+    def display_groups_calendar(self, groups: list) -> None:
+        """Buduje widok Canvas z osią czasu grup, z kolorowaniem od daty ostatniej aktywności."""
+        self.tree_frame.pack_forget()
+        if hasattr(self, "card_view"): self.card_view.pack_forget()
+        if hasattr(self, "kanban_view"): self.kanban_view.pack_forget()
+
+        # Domyślny tryb to najnowsza aktywność, jeśli jeszcze nie wybrano
+        if not hasattr(self, "_group_cal_sort_mode"):
+            self._group_cal_sort_mode = "activity"
+
+        if not hasattr(self, "group_cal_frame"):
+            self.group_cal_frame = tk.Frame(self.content_frame, bg=C["bg"])
+
+            # --- Pasek narzędzi tylko dla kalendarza ---
+            self.cal_top_frame = tk.Frame(self.group_cal_frame, bg=C["bg"])
+            self.cal_top_frame.pack(side="top", fill="x", pady=(0, 5))
+
+            self.btn_cal_sort = tk.Button(
+                self.cal_top_frame,
+                text="",
+                bg=C["sidebar"], fg=C["text"], font=FONT_SMALL,
+                relief="flat", cursor="hand2", padx=12, pady=4,
+                activebackground=C["accent"], activeforeground="#000",
+                command=self._toggle_cal_sort
+            )
+            self.btn_cal_sort.pack(side="left")
+
+            # --- Legenda kolorów ---
+            self.cal_legend_frame = tk.Frame(self.cal_top_frame, bg=C["bg"])
+            self.cal_legend_frame.pack(side="right", padx=10)
+
+            def add_legend(color, text):
+                tk.Label(self.cal_legend_frame, text="■", fg=color, bg=C["bg"], font=("Segoe UI", 12)).pack(side="left")
+                tk.Label(self.cal_legend_frame, text=text, fg=C["text_muted"], bg=C["bg"], font=FONT_SMALL).pack(
+                    side="left", padx=(2, 10))
+
+            add_legend("#10B981", "< 7 dni")  # Zielony
+            add_legend("#F59E0B", "8-30 dni")  # Żółty
+            add_legend("#EF4444", "1-2 miesiące")  # Czerwony
+            add_legend(C.get("card_border", "#475569"), "> 2 miesięcy")  # Szary
+            # -------------------------------------------
+
+            self.cal_canvas = tk.Canvas(self.group_cal_frame, bg=C["bg"], highlightthickness=0)
+            self.cal_vsb = ttk.Scrollbar(self.group_cal_frame, orient="vertical", command=self.cal_canvas.yview)
+            self.cal_hsb = ttk.Scrollbar(self.group_cal_frame, orient="horizontal", command=self.cal_canvas.xview)
+            self.cal_canvas.configure(yscrollcommand=self.cal_vsb.set, xscrollcommand=self.cal_hsb.set)
+
+            self.cal_vsb.pack(side="right", fill="y")
+            self.cal_hsb.pack(side="bottom", fill="x")
+            self.cal_canvas.pack(side="left", fill="both", expand=True)
+            self.cal_canvas.bind("<MouseWheel>",
+                                 lambda e: self.cal_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+        # Zmiana tekstu przycisku
+        if self._group_cal_sort_mode == "activity":
+            self.btn_cal_sort.config(text="🔄 Przełącz: Teraz sortujesz po NAJNOWSZEJ AKTYWNOŚCI")
+        else:
+            self.btn_cal_sort.config(text="🔄 Przełącz: Teraz sortujesz CHRONOLOGICZNIE (Utworzenie)")
+
+        self.group_cal_frame.pack(fill="both", expand=True)
+        self.cal_canvas.delete("all")
+
+        parsed_groups = []
+        now = datetime.now(timezone.utc)
+        min_date = now
+
+        for g in groups:
+            c_raw = g.get("DATE_CREATE")
+            a_raw = g.get("DATE_ACTIVITY") or c_raw
+            if not c_raw: continue
+
+            c_dt = parse_to_aware_datetime(c_raw)
+            a_dt = parse_to_aware_datetime(a_raw)
+
+            if not c_dt or not a_dt: continue
+            if c_dt < min_date: min_date = c_dt
+
+            parsed_groups.append({
+                "name": g.get("NAME", "Bez nazwy"),
+                "start": c_dt,
+                "end": a_dt
+            })
+
+        # --- WYBÓR SORTOWANIA ---
+        if self._group_cal_sort_mode == "activity":
+            parsed_groups.sort(key=lambda x: x["end"], reverse=True)
+        else:
+            parsed_groups.sort(key=lambda x: x["start"])
+
+        if not parsed_groups:
+            self.cal_canvas.create_text(20, 20, text="Brak danych do wyświetlenia.", fill=C["text"], anchor="nw")
+            return
+
+        row_height = 40
+        label_width = 300
+        day_width = 3
+        total_days = (now - min_date).days + 1
+
+        canvas_width = label_width + (total_days * day_width) + 200
+        canvas_height = len(parsed_groups) * row_height + 80
+        self.cal_canvas.configure(scrollregion=(0, 0, canvas_width, canvas_height))
+
+        axis_y = 40
+        # Linia dzisiejszej daty (pionowa)
+        today_x = label_width + (now - min_date).days * day_width
+        self.cal_canvas.create_line(today_x, axis_y, today_x, canvas_height, fill="#10B981", dash=(2, 2))
+        self.cal_canvas.create_text(today_x, axis_y - 10, text="DZIŚ", fill="#10B981", font=("Segoe UI", 8, "bold"))
+
+        for i, pg in enumerate(parsed_groups):
+            y0 = axis_y + 10 + i * row_height
+            y1 = y0 + row_height - 12
+
+            days_inactive = (now - pg["end"]).days
+
+            # --- KOLORYZACJA ZALEŻNA OD AKTYWNOŚCI ---
+            if days_inactive <= 7:
+                bar_color = "#10B981"  # Zielony
+                outline_color = "#059669"
+                text_color = C["text"]  # Wyraźny biały/czarny
+            elif days_inactive <= 30:
+                bar_color = "#F59E0B"  # Żółty/Pomarańczowy
+                outline_color = "#D97706"
+                text_color = C["text"]
+            elif days_inactive <= 60:
+                bar_color = "#EF4444"  # Czerwony
+                outline_color = "#B91C1C"
+                text_color = C["text_muted"]  # Troszkę przygaszony
+            else:
+                bar_color = C.get("card_border", "#475569")  # Szary (neutralny interfejsu)
+                outline_color = C.get("text_muted", "#64748B")
+                text_color = C.get("text_muted", "#64748B")  # Mocniej przygaszony
+
+            name_disp = pg["name"]
+            if len(name_disp) > 35: name_disp = name_disp[:32] + "..."
+            self.cal_canvas.create_text(10, y0 + 10, text=name_disp, fill=text_color, anchor="w", font=FONT_BODY)
+
+            start_offset = (pg["start"] - min_date).days
+            end_offset = (pg["end"] - min_date).days
+
+            x0 = label_width + start_offset * day_width
+            x1 = label_width + end_offset * day_width
+            if x1 - x0 < 8: x1 = x0 + 8
+
+            self.cal_canvas.create_rectangle(x0, y0, x1, y1, fill=bar_color, outline=outline_color, width=1)
+
+            date_txt = f"{pg['start'].strftime('%d.%m.%y')} - {pg['end'].strftime('%d.%m.%y')}"
+            self.cal_canvas.create_text(x1 + 10, y0 + 10, text=date_txt, fill=C["text_muted"], anchor="w",
+                                        font=("Segoe UI", 7))
+
+        if self._group_cal_sort_mode == "activity":
+            self.view_label_var.set("Widok: Kalendarz aktywności (Najnowsze na górze)")
+        else:
+            self.view_label_var.set("Widok: Kalendarz aktywności (Chronologicznie)")
+
+        self.count_var.set(f"{len(parsed_groups)} grup")
+
 
     # ==================================================================
     # Filtry
@@ -986,8 +1176,7 @@ class BitrixApp:
         self.apply_filter()
 
     def update_resp_filter_options(self) -> None:
-        """Odświeża listę pracowników, zachowując bieżący wybór jeśli nadal istnieje."""
-        prev_resp = self.current_resp_filter.get()  # zapamiętaj przed nadpisaniem
+        prev_resp = self.current_resp_filter.get()
         workers: set = set()
         for task in self.all_fetched_tasks:
             resp = f"{task.get('RESPONSIBLE_NAME', ' ')} {task.get('RESPONSIBLE_LAST_NAME', '')}".strip()
@@ -1005,7 +1194,6 @@ class BitrixApp:
                 workers.add(p)
         self.all_responsibles = ["Wszyscy"] + sorted(workers)
         self.resp_combobox.config(values=self.all_responsibles)
-        # Przywróć poprzedni wybór lub wróć do "Wszyscy"
         if prev_resp in self.all_responsibles:
             self.current_resp_filter.set(prev_resp)
         else:
@@ -1059,14 +1247,13 @@ class BitrixApp:
             self._show_kanban(False)
             self._show_tree()
             self.display_data(filtered)
-        # Zapamiętaj bieżący stan filtrów
         self._save_config()
 
     def reset_filters(self) -> None:
         self.current_group_view_id   = None
         self.current_group_view_name = None
         if self.display_mode.get() == "kanban":
-            self._pre_kanban_filter = "W trakcie"  # co wróci po wyjściu z kanbana
+            self._pre_kanban_filter = "W trakcie"
             self.current_filter.set("Wszystkie")
         else:
             self.current_filter.set("W trakcie")
@@ -1142,14 +1329,12 @@ class BitrixApp:
         self.count_var.set(f"{len(tasks)} zadań")
 
     def _run_live_timers(self, generation: int) -> None:
-        """Tykający timer dla listy zadań — zatrzymuje się gdy generation != self._ui_generation."""
         if generation != self._ui_generation:
             return
 
         if self.current_view.get() == "tasks" and self.live_timer_var.get():
             now = datetime.now(timezone.utc)
 
-            # Krok 1: Znajdź najnowszą datę aktywności dla każdego pracownika (ignorując zadania z uczestnikami)
             latest_for_resp = {}
             for item_id, data in self.active_tree_timers.items():
                 if not data.get("has_participants"):
@@ -1158,15 +1343,11 @@ class BitrixApp:
                     if resp not in latest_for_resp or dt > latest_for_resp[resp]:
                         latest_for_resp[resp] = dt
 
-            # Krok 2: Zaktualizuj czasy zgodnie z regułami
             for item_id, data in self.active_tree_timers.items():
                 if self.tree.exists(item_id):
                     should_tick = False
-
-                    # Licz zawsze, jeśli w zadaniu są uczestnicy (ktoś inny może mieć odpalony czas)
                     if data.get("has_participants"):
                         should_tick = True
-                    # Jeśli nie ma uczestników, licz tylko wtedy, gdy data aktywności jest tą najnowszą dla tego pracownika
                     elif data["activity_dt"] == latest_for_resp.get(data.get("resp")):
                         should_tick = True
 
@@ -1180,10 +1361,6 @@ class BitrixApp:
                                 self.tree.item(item_id, values=vals)
 
         self.root.after(1000, lambda: self._run_live_timers(generation))
-
-    # ==================================================================
-    # Sortowanie Treeview
-    # ==================================================================
 
     def sort_treeview(self, col: str, reverse: bool) -> None:
         data = [(self.tree.set(child, col), child) for child in self.tree.get_children("")]
@@ -1225,7 +1402,7 @@ class BitrixApp:
                 self.tree.column(col, width=max_w, minwidth=max_w, stretch=False)
 
     # ==================================================================
-    # Obsługa akcji (otwieranie zadań, grup)
+    # Obsługa akcji
     # ==================================================================
 
     def handle_main_action(self) -> None:
@@ -1275,6 +1452,7 @@ class BitrixApp:
             resp.raise_for_status()
             task_data = resp.json().get("result", {}).get("task", {})
             if task_data:
+                os.makedirs(os.path.dirname(task_file), exist_ok=True)
                 with open(task_file, "w", encoding="utf-8") as f:
                     json.dump(task_data, f, ensure_ascii=False, indent=4)
         except Exception:
@@ -1332,7 +1510,6 @@ class BitrixApp:
         title = task_data.get("title", "")
         window.title(f"#{t_id} — {title}")
 
-        # ── Header (poza scrollem — zawsze widoczny) ──────────────────
         header = tk.Frame(window, bg=C["sidebar"], pady=10, padx=14)
         header.pack(fill="x")
         tk.Frame(header, bg=STATUS_COLORS.get("W trakcie", C["accent"]), width=4).pack(
@@ -1343,7 +1520,6 @@ class BitrixApp:
                  wraplength=800, justify="left").pack(anchor="w")
         tk.Frame(window, bg=C["accent"], height=2).pack(fill="x")
 
-        # ── Scrollowalny obszar treści ────────────────────────────────
         outer = tk.Frame(window, bg=C["bg"])
         outer.pack(fill="both", expand=True)
 
@@ -1370,11 +1546,8 @@ class BitrixApp:
         main.bind("<Configure>", _on_inner_configure)
         canvas.bind("<Configure>", _on_canvas_configure)
         canvas.bind("<MouseWheel>", _on_mousewheel)
-        # Binduj scroll także na widżetach wewnątrz
         window._scroll_canvas = canvas
 
-        # ── Treść ─────────────────────────────────────────────────────
-        # Opis
         tk.Label(main, text="Opis zadania", bg=C["bg"],
                  fg=C["accent2"], font=FONT_TITLE).pack(anchor="w")
         desc_bg = tk.Frame(main, bg=C["card"], padx=10, pady=8,
@@ -1394,14 +1567,10 @@ class BitrixApp:
 
         desc_text.insert("1.0", task_data.get("description", "Brak opisu."))
         desc_text.config(state="disabled")
-        # Scroll myszą na opisie → przewija opis (nie okno główne)
         desc_text.bind("<MouseWheel>", lambda e: desc_text.yview_scroll(
             int(-1 * (e.delta / 120)), "units") or "break")
 
-        # Sekcja czasu pracy
         self._build_time_section(main, task_data, messages, window)
-
-        # Chat
         self._build_chat_section(main, messages, chat_id, window)
 
     def _build_time_section(self, parent: tk.Frame, task_data: dict,
@@ -1415,7 +1584,6 @@ class BitrixApp:
                         task_data.get("timeSpentInLogs") or 0)
         today_date = datetime.now(timezone(timedelta(hours=1))).date()
 
-        # ── Parsowanie sesji ──────────────────────────────────────────
         user_sessions: dict = {}
         open_starts: dict = {}
 
@@ -1460,7 +1628,6 @@ class BitrixApp:
                             break
                 open_starts.clear()
 
-        # ── Buduj tracker ze wszystkich sesji + dailyMap ──────────────
         tracker: dict = {}
         for user, sessions in user_sessions.items():
             if not sessions:
@@ -1491,7 +1658,6 @@ class BitrixApp:
                 "daily_map": daily_map,
             }
 
-        # ── Wiersz sumy + live timery ─────────────────────────────────
         total_time_var = tk.StringVar()
         tk.Label(time_lf, textvariable=total_time_var, bg=C["bg"],
                  fg=C["accent"], font=("Segoe UI Semibold", 12)).pack(anchor="w", pady=(0, 4))
@@ -1528,7 +1694,6 @@ class BitrixApp:
             self.update_live_timers(window, active_timers, total_time_var,
                                     task_time, window.current_cycle)
 
-        # ── Przycisk rozwijania raportu dziennego ─────────────────────
         has_daily = any(data["daily_map"] for data in tracker.values())
         if has_daily:
             toggle_var = tk.BooleanVar(value=False)
@@ -1538,8 +1703,6 @@ class BitrixApp:
 
             detail_frame = tk.Frame(time_lf, bg=C["bg"])
 
-            # detail_frame nie jest pakowany od razu — pojawi się po kliknięciu
-
             def _toggle_details():
                 if toggle_var.get():
                     detail_frame.pack(fill="x", pady=(6, 0))
@@ -1547,7 +1710,6 @@ class BitrixApp:
                 else:
                     detail_frame.pack_forget()
                     btn_toggle.config(text="▼ Pokaż zestawienie dzienne")
-                # Odśwież scrollregion okna po zmianie rozmiaru
                 try:
                     canvas = getattr(window, "_scroll_canvas", None)
                     if canvas:
@@ -1571,10 +1733,7 @@ class BitrixApp:
 
             self._build_daily_breakdown(detail_frame, tracker)
 
-    # ------------------------------------------------------------------
-
     def _build_daily_breakdown(self, parent: tk.Frame, tracker: dict) -> None:
-        """Tabela per user × per dzień."""
         all_days: set = set()
         for data in tracker.values():
             all_days.update(data["daily_map"].keys())
@@ -1603,7 +1762,6 @@ class BitrixApp:
                      ).grid(row=row, column=col, sticky="nsew",
                             padx=(0, 1), pady=(0, 1))
 
-        # Nagłówek
         cell(0, 0, "Data", C["text_muted"], bold=True)
         for ci, u in enumerate(users, 1):
             disp = u if len(u) <= 16 else u[:13] + "…"
@@ -1611,7 +1769,6 @@ class BitrixApp:
         if show_sum:
             cell(0, len(users) + 1, "Suma", C["accent"], bold=True)
 
-        # Wiersze
         for ri, day in enumerate(sorted_days, 1):
             if day == today:
                 day_str, day_fg, row_bg = (
@@ -1644,7 +1801,6 @@ class BitrixApp:
                 cell(ri, len(users) + 1,
                      seconds_to_readable(day_total), C["accent"], row_bg)
 
-        # Wiersz sum
         sr = len(sorted_days) + 1
         cell(sr, 0, "Łącznie", C["accent"], C["sidebar"], bold=True)
         grand = 0.0
@@ -1655,6 +1811,7 @@ class BitrixApp:
         if show_sum:
             cell(sr, len(users) + 1,
                  seconds_to_readable(grand), C["btn_green"], C["sidebar"], bold=True)
+
     def _build_chat_section(self, parent: tk.Frame, messages: list,
                             chat_id, window: tk.Toplevel) -> None:
         hdr = f"💬 Wiadomości (Chat ID: {chat_id})" if chat_id else "💬 Wiadomości (brak czatu)"
@@ -1711,10 +1868,6 @@ class BitrixApp:
         chat_text.tag_config("body", foreground=C["text"])
         chat_text.config(state="disabled")
 
-    # ==================================================================
-    # Live timery w oknie zadania
-    # ==================================================================
-
     def update_live_timers(self, window: tk.Toplevel, active_timers: dict,
                            total_time_var: tk.StringVar, task_time: int, cycle_id: int) -> None:
         if not window.winfo_exists() or getattr(window, "current_cycle", None) != cycle_id:
@@ -1743,10 +1896,6 @@ class BitrixApp:
             1000,
             lambda: self.update_live_timers(window, active_timers, total_time_var, task_time, cycle_id),
         )
-
-    # ==================================================================
-    # Pobieranie wiadomości (wątek)
-    # ==================================================================
 
     def bg_fetch_messages(self, task_data: dict, chat_id, chat_file: str,
                           window: tk.Toplevel) -> None:
@@ -1778,16 +1927,13 @@ class BitrixApp:
                     time.sleep(1)
 
             if messages:
+                os.makedirs(os.path.dirname(chat_file), exist_ok=True)
                 with open(chat_file, "w", encoding="utf-8") as f:
                     json.dump(messages, f, ensure_ascii=False, indent=4)
                 self._check_and_fetch_missing_users(task_data, messages)
                 self.root.after(0, lambda: self.reload_task_window(window, task_data, messages, chat_id))
         except requests.exceptions.RequestException as e:
             print(f"Błąd pobierania wiadomości: {e}")
-
-    # ==================================================================
-    # Pomocnicze
-    # ==================================================================
 
     def _extract_participants(self, task: dict) -> list[str]:
         result: list = []
