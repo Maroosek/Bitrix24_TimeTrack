@@ -5,6 +5,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 
+TZ_LOCAL = datetime.now().astimezone().tzinfo
 
 def get_data_dir() -> str:
     """Zwraca ścieżkę do katalogu z danymi i tworzy wymagane podkatalogi."""
