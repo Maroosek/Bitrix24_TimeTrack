@@ -56,16 +56,18 @@ def _parse_sessions(
         except Exception:
             continue
 
+        # Nowy format angielski + stary polski
         start_m = re.search(
-            r"\[USER=\d+\](.*?)\[/USER\]\s+włączył[a]?\s+śledzenie\s+czasu",
+            r"\[USER=\d+\](.*?)\[/USER\]\s+(?:włączył[a]?\s+śledzenie\s+czasu|enabled\s+personal\s+task\s+time\s+tracker)",
             text, re.IGNORECASE,
         )
         stop_m = re.search(
-            r"\[USER=\d+\](.*?)\[/USER\]\s+wyłączył[a]?\s+śledzenie\s+czasu",
+            r"\[USER=\d+\](.*?)\[/USER\]\s+(?:wyłączył[a]?\s+śledzenie\s+czasu|stopped\s+task\s+time\s+tracker)",
             text, re.IGNORECASE,
         )
         finish_m = re.search(
-            r"(ukończył|zakończył)[a]?\s+zadanie", text, re.IGNORECASE
+            r"(?:ukończył|zakończył)[a]?\s+zadanie|completed\s+the\s+task",
+            text, re.IGNORECASE,
         )
 
         if start_m and start_m.group(1).strip().lower() == name_lc:

@@ -69,7 +69,7 @@ class BitrixApp:
     # ------------------------------------------------------------------
 
     def __init__(self, root: tk.Tk) -> None:
-        self._TASK_STATUS_DONE   = {"5", "4"}
+        self._TASK_STATUS_DONE = {"5", "4", "completed", "supposedly_done"}
         self._TASK_STATUS_ACTIVE = {"3"}
         self.root = root
         self.root.title("Bitrix24 — Task Manager")
@@ -1281,9 +1281,25 @@ class BitrixApp:
 
         for task in tasks:
             # Status — camelCase API zwraca "status", REAL_STATUS z tasks.task.list
+            # NOWE:
             status_raw = str(_get(task, "status", "REAL_STATUS") or "")
-            is_done = status_raw in self._TASK_STATUS_DONE  # {"4", "5"}
-            is_active = status_raw in self._TASK_STATUS_ACTIVE  # {"3"}
+            closed_raw = _get(task, "closedDate", "CLOSED_DATE") or ""
+            closed_dt = parse_to_aware_datetime(closed_raw) if closed_raw else None
+
+            # Jeśli status dostępny — użyj go; jeśli nie — wnioskuj z closedDate
+            if status_raw:
+                is_done = status_raw in self._TASK_STATUS_DONE
+                is_active = status_raw in self._TASK_STATUS_ACTIVE
+            else:
+                is_done = closed_dt is not None  # ma datę zamknięcia → zakończone
+                is_active = not is_done  # brak daty zamknięcia → traktuj jako aktywne
+
+            # DIAGNOSTYKA
+            title_dbg = _get(task, "title", "TITLE", "name") or f"id={task.get('id', '?')}"
+            closed_dbg = _get(task, "closedDate", "CLOSED_DATE") or "BRAK"
+            activity_dbg = _get(task, "activityDate", "ACTIVITY_DATE") or "BRAK"
+            print(f"  [Task] '{str(title_dbg)[:40]}' status={status_raw!r} "
+                  f"is_done={is_done} closedDate={closed_dbg!r} activityDate={activity_dbg!r}")
 
             if is_done:
                 done_tasks += 1
@@ -1295,24 +1311,14 @@ class BitrixApp:
                 continue
 
             if is_done:
-                # closedDate jest wypełnione gdy status=5 lub 4
-                raw_end = _get(
-                    task,
-                    "closedDate", "CLOSED_DATE",
-                    "activityDate", "ACTIVITY_DATE",
-                    "changedDate", "CHANGED_DATE",
-                )
-                t_end = parse_to_aware_datetime(raw_end) or now
+                # closed_dt już mamy z góry, nie parsuj ponownie
+                t_end = closed_dt or now
                 kind = "done"
             elif is_active:
                 t_end = now
                 kind = "active"
             else:
-                raw_end = _get(
-                    task,
-                    "activityDate", "ACTIVITY_DATE",
-                    "changedDate", "CHANGED_DATE",
-                )
+                raw_end = _get(task, "activityDate", "ACTIVITY_DATE", "changedDate", "CHANGED_DATE")
                 t_end = parse_to_aware_datetime(raw_end) or now
                 kind = "other"
 
@@ -1821,13 +1827,15 @@ class BitrixApp:
             except Exception:
                 continue
 
-            start_m  = _re.search(
-                r"\[USER=\d+\](.*?)\[/USER\]\s+włączył[a]?\s+śledzenie\s+czasu",
+            start_m = _re.search(
+                r"\[USER=\d+\](.*?)\[/USER\]\s+(?:włączył[a]?\s+śledzenie\s+czasu|enabled\s+personal\s+task\s+time\s+tracker)",
                 text, _re.IGNORECASE)
-            stop_m   = _re.search(
-                r"\[USER=\d+\](.*?)\[/USER\]\s+wyłączył[a]?\s+śledzenie\s+czasu",
+            stop_m = _re.search(
+                r"\[USER=\d+\](.*?)\[/USER\]\s+(?:wyłączył[a]?\s+śledzenie\s+czasu|stopped\s+task\s+time\s+tracker)",
                 text, _re.IGNORECASE)
-            finish_m = _re.search(r"(ukończył|zakończył)[a]?\s+zadanie", text, _re.IGNORECASE)
+            finish_m = _re.search(
+                r"(?:ukończył|zakończył)[a]?\s+zadanie|completed\s+the\s+task",
+                text, _re.IGNORECASE)
 
             if start_m:
                 user = start_m.group(1).strip()
