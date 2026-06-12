@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageTk
 from config import WEBHOOK_URL
 
 # ── Stałe retry ───────────────────────────────────────────────────────────────
-DEFAULT_TIMEOUT   = 2      # sekundy na pojedynczy request
+DEFAULT_TIMEOUT   = 5      # sekundy na pojedynczy request
 MAX_RETRIES       = 5       # ile razy ponawiamy przy błędzie sieci / timeout
 RETRY_BACKOFF     = 1.5     # mnożnik czasu oczekiwania między próbami (2s, 4s, 8s…)
 # ─────────────────────────────────────────────────────────────────────────────
