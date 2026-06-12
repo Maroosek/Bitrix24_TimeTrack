@@ -23,6 +23,9 @@ ROW_H   = 38
 LABEL_W = 88
 AXIS_H  = 26
 
+MAX_SESSION_HOURS = 10   # sesja dłuższa niż tyle godzin → traktowana jako zapomniana
+MAX_SESSION_SECS  = MAX_SESSION_HOURS * 3600
+
 BLOCK_PALETTE = [
     ("#3B82F6", "#1D4ED8"),
     ("#10B981", "#059669"),
@@ -36,6 +39,30 @@ BLOCK_PALETTE = [
 
 
 # ── Parser sesji ──────────────────────────────────────────────────────────────
+
+def _cap_session(
+    start: datetime, end: datetime, is_open: bool,
+) -> tuple[datetime, datetime, bool]:
+    """
+    Przycina sesję do rozsądnej długości.
+    Reguła 1: sesja nie może przekroczyć północy dnia startu.
+    Reguła 2: sesja nie może być dłuższa niż MAX_SESSION_HOURS.
+    Jeśli przycięta → is_open = True (pokazujemy jako 'otwartą').
+    """
+    midnight   = (start + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    was_capped = False
+
+    if end > midnight:
+        end        = midnight - timedelta(seconds=1)
+        was_capped = True
+
+    if (end - start).total_seconds() > MAX_SESSION_SECS:
+        end        = start + timedelta(seconds=MAX_SESSION_SECS)
+        was_capped = True
+
+    return start, end, is_open or was_capped
 
 def _parse_sessions(
     messages: list, person_name: str
@@ -69,6 +96,10 @@ def _parse_sessions(
             r"(?:ukończył|zakończył)[a]?\s+zadanie|completed\s+the\s+task",
             text, re.IGNORECASE,
         )
+        total_m = re.search(
+            r"total\s+task\s+time[:\s]",
+            text, re.IGNORECASE,
+        )
 
         if start_m and start_m.group(1).strip().lower() == name_lc:
             sessions.append([dt, None])
@@ -77,16 +108,20 @@ def _parse_sessions(
                 if sess[1] is None:
                     sess[1] = dt
                     break
-        elif finish_m:
+        elif finish_m or total_m:
             for sess in reversed(sessions):
                 if sess[1] is None:
                     sess[1] = dt
                     break
 
-    now    = datetime.now(TZ_LOCAL)
+    now = datetime.now(TZ_LOCAL)
     result = []
     for s, e in sessions:
-        result.append((s, e or now, e is None))
+        is_open = e is None
+        end = e if e is not None else now
+        s, end, is_open = _cap_session(s, end, is_open)
+        if (end - s).total_seconds() > 0:
+            result.append((s, end, is_open))
     return result
 
 
@@ -668,6 +703,7 @@ class SummaryView(tk.Frame):
                     "is_open":    is_open,
                     "fill_orig":  fill,
                     "outline_orig": outline,
+                    "task_id": t_id,
                 }
 
                 # Etykieta bloku
@@ -800,11 +836,31 @@ class SummaryView(tk.Frame):
 
         tk.Frame(inner, bg=C.get("card_border", "#334155"), height=1).pack(fill="x", pady=6)
 
-        tk.Button(inner, text="✕ Zamknij",
-                  bg=C["sidebar"], fg=C["text_muted"],
-                  font=("Segoe UI", 8), relief="flat", cursor="hand2",
-                  padx=8, pady=2,
-                  command=popup.destroy).pack(anchor="e")
+        btn_row = tk.Frame(inner, bg=C["card"])
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        task_id = info.get("task_id")
+        if task_id:
+            def _open_task(tid=task_id, p=popup):
+                p.destroy()
+                self.app._open_task_direct(str(tid))
+
+            tk.Button(
+                btn_row, text="↗ Otwórz zadanie",
+                bg=C["accent"], fg="#fff",
+                font=("Segoe UI", 8), relief="flat", cursor="hand2",
+                padx=10, pady=3,
+                activebackground=C.get("accent2", C["accent"]), activeforeground="#fff",
+                command=_open_task,
+            ).pack(side="left")
+
+        tk.Button(
+            btn_row, text="✕ Zamknij",
+            bg=C["sidebar"], fg=C["text_muted"],
+            font=("Segoe UI", 8), relief="flat", cursor="hand2",
+            padx=8, pady=3,
+            command=popup.destroy,
+        ).pack(side="right")
 
         # Pozycja — żeby nie wychodziło poza ekran
         popup.update_idletasks()

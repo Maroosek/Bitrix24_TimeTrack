@@ -15,6 +15,43 @@ from PIL import Image, ImageDraw, ImageTk
 
 from config import WEBHOOK_URL
 
+# ── Stałe retry ───────────────────────────────────────────────────────────────
+DEFAULT_TIMEOUT   = 2      # sekundy na pojedynczy request
+MAX_RETRIES       = 5       # ile razy ponawiamy przy błędzie sieci / timeout
+RETRY_BACKOFF     = 1.5     # mnożnik czasu oczekiwania między próbami (2s, 4s, 8s…)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _get_with_retry(
+    url: str,
+    params: dict | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_retries: int = MAX_RETRIES,
+) -> requests.Response:
+    """
+    Wykonuje GET z automatycznym retry przy TimeoutError i ConnectionError.
+    Przy wyczerpaniu prób rzuca ostatni napotkany wyjątek.
+    Błędy HTTP (4xx, 5xx) są propagowane natychmiast bez retry.
+    """
+    last_exc: Exception | None = None
+    wait = RETRY_BACKOFF
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            if attempt < max_retries:
+                print(f"[retry {attempt}/{max_retries}] {type(e).__name__} — czekam {wait:.0f}s…")
+                time.sleep(wait)
+                wait *= RETRY_BACKOFF
+        except requests.exceptions.HTTPError:
+            raise   # błąd HTTP — nie ponawiamy
+
+    raise last_exc  # wyczerpano próby
+
 
 class BitrixApiClient:
     """Klient HTTP dla Bitrix24 REST API."""
@@ -42,8 +79,7 @@ class BitrixApiClient:
         start     = 0
 
         while True:
-            resp = requests.get(f"{full_url}?start={start}", timeout=10)
-            resp.raise_for_status()
+            resp = _get_with_retry(f"{full_url}?start={start}")
             data = resp.json()
             if "result" not in data:
                 break
@@ -82,7 +118,7 @@ class BitrixApiClient:
             if os.path.exists(local_path):
                 img = Image.open(local_path)
             else:
-                r   = requests.get(url, timeout=3)
+                r   = requests.get(url, timeout=5)
                 img = Image.open(io.BytesIO(r.content))
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 img.save(local_path)
@@ -107,7 +143,7 @@ class BitrixApiClient:
     def fetch_in_progress_tasks(self, on_progress=None) -> list:
         """
         Pobiera zadania o statusie 'W trakcie' (REAL_STATUS=3)
-        z ostatnich 7 dni aktywności.
+        z ostatnich 28 dni aktywności.
 
         on_progress(n: int) — opcjonalny callback wywoływany po każdej
         stronie wyników z aktualną liczbą pobranych zadań.
@@ -126,8 +162,7 @@ class BitrixApiClient:
                 "filter[>=ACTIVITY_DATE]": date_str,
                 "start":                   start,
             }
-            resp = requests.get(full_url, params=params, timeout=10)
-            resp.raise_for_status()
+            resp  = _get_with_retry(full_url, params=params)
             data  = resp.json()
             tasks = data.get("result", {}).get("tasks", [])
             if not tasks:
@@ -148,7 +183,7 @@ class BitrixApiClient:
 
     def fetch_standard_tasks(self, file_exists: bool, on_progress=None) -> list:
         """
-        Pobiera wszystkie zadania (pełna lista lub delta ostatnich 30 dni).
+        Pobiera wszystkie zadania (pełna lista lub delta ostatnich 45 dni).
 
         file_exists — czy tasks_list.json już istnieje (tryb delta vs pełny).
         on_progress(n) — opcjonalny callback z postępem.
@@ -169,8 +204,7 @@ class BitrixApiClient:
                     "filter[>=ACTIVITY_DATE]": date_str,
                     "start": start,
                 }
-                resp = requests.get(full_url, params=params, timeout=10)
-                resp.raise_for_status()
+                resp  = _get_with_retry(full_url, params=params)
                 data  = resp.json()
                 tasks = data.get("result", {}).get("tasks", [])
                 if not tasks:
@@ -186,8 +220,7 @@ class BitrixApiClient:
             full_url = f"{WEBHOOK_URL}task.item.list.json"
 
             while True:
-                resp = requests.get(f"{full_url}?start={start}", timeout=10)
-                resp.raise_for_status()
+                resp = _get_with_retry(f"{full_url}?start={start}")
                 data = resp.json()
                 if "result" not in data:
                     break
@@ -216,8 +249,7 @@ class BitrixApiClient:
         start       = 0
 
         while True:
-            resp = requests.get(f"{full_url}&start={start}", timeout=10)
-            resp.raise_for_status()
+            resp  = _get_with_retry(f"{full_url}&start={start}")
             data  = resp.json()
             tasks = data.get("result", {}).get("tasks", [])
             if not tasks:
@@ -238,10 +270,11 @@ class BitrixApiClient:
         Zapisuje do details/task_{task_id}.json.
         Rzuca requests.RequestException przy błędzie sieci.
         """
-        resp = requests.get(
-            f"{WEBHOOK_URL}tasks.task.get?taskId={task_id}", timeout=5
+        resp      = _get_with_retry(
+            f"{WEBHOOK_URL}tasks.task.get",
+            params={"taskId": task_id},
+            timeout=5,
         )
-        resp.raise_for_status()
         task_data = resp.json().get("result", {}).get("task", {})
 
         if task_data:
@@ -267,8 +300,7 @@ class BitrixApiClient:
         start      = 0
 
         while True:
-            resp = requests.get(f"{full_url}?start={start}", timeout=10)
-            resp.raise_for_status()
+            resp = _get_with_retry(f"{full_url}?start={start}")
             data = resp.json()
             if "result" not in data:
                 break
@@ -299,7 +331,6 @@ class BitrixApiClient:
         """
         messages: list = []
         last_id        = None
-        timeout        = 5
 
         while True:
             url = (
@@ -310,8 +341,7 @@ class BitrixApiClient:
                 url += f"&LAST_ID={last_id}"
 
             try:
-                resp = requests.get(url, timeout=timeout)
-                resp.raise_for_status()
+                resp    = _get_with_retry(url, timeout=10)
                 fetched = resp.json().get("result", {}).get("messages", [])
                 if not fetched:
                     break
@@ -321,12 +351,11 @@ class BitrixApiClient:
                     break
                 last_id = min(valid_ids)
                 time.sleep(0.5)
-                timeout = 5
-            except requests.exceptions.Timeout:
-                timeout += 10
-                if timeout > 45:
-                    break
-                time.sleep(1)
+            except requests.RequestException:
+                # _get_with_retry wyczerpał próby — przerywamy pobieranie czatu
+                # zamiast crashować cały import
+                print(f"[chat {chat_id}] Nie udało się pobrać kolejnej strony — przerywam.")
+                break
 
         if messages:
             os.makedirs(os.path.dirname(chat_file), exist_ok=True)
@@ -338,24 +367,21 @@ class BitrixApiClient:
     def fetch_tasks_for_groups_report(self, on_progress=None) -> list:
         """
         Pobiera wszystkie zadania przypisane do grup (!GROUP_ID != 0).
-        Używa tasks.task.list bez ograniczenia select[] żeby mieć pewność
-        że closedDate, createdDate i status są obecne w odpowiedzi.
 
         Zapisuje wynik do group_tasks_report.json.
         Rzuca requests.RequestException przy błędzie sieci.
         """
-        full_url = f"{WEBHOOK_URL}tasks.task.list"
+        full_url  = f"{WEBHOOK_URL}tasks.task.list"
         all_tasks: list = []
-        start = 0
+        start     = 0
 
         while True:
             params = {
                 "filter[!GROUP_ID]": 0,
-                "start": start,
+                "start":             start,
             }
-            resp = requests.get(full_url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
+            resp  = _get_with_retry(full_url, params=params, timeout=15)
+            data  = resp.json()
             tasks = data.get("result", {}).get("tasks", [])
             if not tasks:
                 break

@@ -652,9 +652,14 @@ class BitrixApp:
         self.root.after(300_000, self._auto_refresh_trigger)
 
     def _auto_refresh_trigger(self) -> None:
+        mode = self.current_view.get()
+        # Odświeżanie automatyczne tylko w widoku zadań
+        if mode != "tasks":
+            self._schedule_auto_refresh()
+            return
+
         if not self.is_fetching:
-            mode = self.current_view.get()
-            if mode == "tasks" and self.current_group_view_id:
+            if self.current_group_view_id:
                 self.is_fetching = True
                 self._toggle_buttons_state("disabled")
                 self.status_var.set("Automatyczne odświeżanie grupy...")
@@ -665,6 +670,7 @@ class BitrixApp:
                 ).start()
             else:
                 self.fetch_data(is_auto=True)
+
         self._schedule_auto_refresh()
 
     # ==================================================================
@@ -1298,8 +1304,8 @@ class BitrixApp:
             title_dbg = _get(task, "title", "TITLE", "name") or f"id={task.get('id', '?')}"
             closed_dbg = _get(task, "closedDate", "CLOSED_DATE") or "BRAK"
             activity_dbg = _get(task, "activityDate", "ACTIVITY_DATE") or "BRAK"
-            print(f"  [Task] '{str(title_dbg)[:40]}' status={status_raw!r} "
-                  f"is_done={is_done} closedDate={closed_dbg!r} activityDate={activity_dbg!r}")
+            # print(f"  [Task] '{str(title_dbg)[:40]}' status={status_raw!r} "
+            #       f"is_done={is_done} closedDate={closed_dbg!r} activityDate={activity_dbg!r}")
 
             if is_done:
                 done_tasks += 1
@@ -1836,6 +1842,10 @@ class BitrixApp:
             finish_m = _re.search(
                 r"(?:ukończył|zakończył)[a]?\s+zadanie|completed\s+the\s+task",
                 text, _re.IGNORECASE)
+            total_m = _re.search(
+                r"total\s+task\s+time[:\s]",
+                text, _re.IGNORECASE,
+            )
 
             if start_m:
                 user = start_m.group(1).strip()
@@ -1848,7 +1858,7 @@ class BitrixApp:
                         sess[1] = dt
                         break
                 open_starts.pop(user, None)
-            elif finish_m:
+            elif finish_m or total_m:
                 for user in list(open_starts.keys()):
                     for sess in reversed(user_sessions.get(user, [])):
                         if sess[1] is None:
