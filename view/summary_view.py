@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 from tkinter import ttk
 import tkinter as tk
 
-from config import C, FONT_BODY, FONT_SMALL, FONT_TITLE, FONT_MONO
+from styles import C, FONT_BODY, FONT_SMALL, FONT_TITLE, FONT_MONO
 from helpers import parse_to_aware_datetime, seconds_to_readable, TZ_LOCAL
 from view.task_utils import (
     get_responsible, get_creator, get_participants_names,

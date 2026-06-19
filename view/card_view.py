@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
 
-from config import C, FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_MONO
+from styles import C, FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_MONO
 from helpers import seconds_to_readable, parse_to_aware_datetime
 from view.task_utils import (
     get_responsible, get_responsible_id, get_creator, get_creator_id,

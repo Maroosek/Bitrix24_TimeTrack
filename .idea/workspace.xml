@@ -5,16 +5,27 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1e68cb93-abe3-4b0e-ab8d-80cfd1239a09" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/Bitrix24_TimeTrack.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Bitrix24_TimeTrack.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app.py" beforeDir="false" afterPath="$PROJECT_DIR$/app.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/card_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/card_view.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/config.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/styles.py" beforeDir="false" afterPath="$PROJECT_DIR$/styles.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/view/card_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/view/card_view.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/view/kanban_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/view/kanban_view.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/view/summary_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/view/summary_view.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/view/task_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/view/task_utils.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -42,6 +53,7 @@
   <component name="PropertiesComponent">{
   &quot;keyToString&quot;: {
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.app.executor&quot;: &quot;Run&quot;,
     &quot;Python.bitrix_modern.executor&quot;: &quot;Run&quot;,
     &quot;Python.main.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
@@ -57,10 +69,19 @@
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\syste\PycharmProjects\Bitrix24_TimeTrack" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\syste\PycharmProjects\Bitrix24_TimeTrack\model" />
+      <recent name="C:\Users\syste\PycharmProjects\Bitrix24_TimeTrack" />
+      <recent name="C:\Users\syste\PycharmProjects\Bitrix24_TimeTrack\view" />
+    </key>
+  </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-a71380e98a7c-JavaScript-PY-252.28238.29" />
         <option value="bundled-python-sdk-a101402ee41c-968fe969f28a-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.28238.29" />
       </set>
     </attachedChunks>
@@ -76,14 +97,27 @@
       <workItem from="1772085697382" duration="37350000" />
       <workItem from="1772431240389" duration="33534000" />
       <workItem from="1773036402223" duration="15594000" />
+      <workItem from="1773640785014" duration="2694000" />
+      <workItem from="1773742881553" duration="5970000" />
     </task>
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
   </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/Bitrix24_TimeTrack$bitrix_modern.coverage" NAME="bitrix_modern Coverage Results" MODIFIED="1772456571369" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/Bitrix24_TimeTrack$main.coverage" NAME="main Coverage Results" MODIFIED="1773060006447" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/Bitrix24_TimeTrack$main.coverage" NAME="main Coverage Results" MODIFIED="1773743737170" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

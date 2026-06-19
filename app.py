@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk
 
 import requests
 
-from config import (
+from styles import (
     C, FONT_BODY, FONT_HEADING, FONT_MONO, FONT_SMALL, FONT_TITLE,
     STATUS_COLORS, STATUS_MAP, apply_theme as _config_apply_theme,
 )
@@ -1301,9 +1301,9 @@ class BitrixApp:
                 is_active = not is_done  # brak daty zamknięcia → traktuj jako aktywne
 
             # DIAGNOSTYKA
-            title_dbg = _get(task, "title", "TITLE", "name") or f"id={task.get('id', '?')}"
-            closed_dbg = _get(task, "closedDate", "CLOSED_DATE") or "BRAK"
-            activity_dbg = _get(task, "activityDate", "ACTIVITY_DATE") or "BRAK"
+            # title_dbg = _get(task, "title", "TITLE", "name") or f"id={task.get('id', '?')}"
+            # closed_dbg = _get(task, "closedDate", "CLOSED_DATE") or "BRAK"
+            # activity_dbg = _get(task, "activityDate", "ACTIVITY_DATE") or "BRAK"
             # print(f"  [Task] '{str(title_dbg)[:40]}' status={status_raw!r} "
             #       f"is_done={is_done} closedDate={closed_dbg!r} activityDate={activity_dbg!r}")
 

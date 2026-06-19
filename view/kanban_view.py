@@ -8,7 +8,7 @@ from tkinter import ttk
 from datetime import datetime, timezone, timedelta
 from typing import Callable
 
-from config import (
+from styles import (
     C, FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_MONO,
     STATUS_MAP, STATUS_COLORS,
 )

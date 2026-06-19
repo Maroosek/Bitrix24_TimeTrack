@@ -10,7 +10,7 @@ import tkinter as tk
 from datetime import datetime, timezone, timedelta
 from typing import Callable
 
-from config import C, FONT_SMALL
+from styles import C, FONT_SMALL
 from helpers import (
     format_date, parse_to_aware_datetime,
     seconds_to_readable, days_since,
