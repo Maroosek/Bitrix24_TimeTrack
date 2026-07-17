@@ -26,6 +26,16 @@ AXIS_H  = 26
 MAX_SESSION_HOURS = 10   # sesja dłuższa niż tyle godzin → traktowana jako zapomniana
 MAX_SESSION_SECS  = MAX_SESSION_HOURS * 3600
 
+WEEK_DAY_NAMES = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Nd"]
+
+# Layout tabeli w widoku tygodniowym
+WK_TASK_COL_W  = 220
+WK_DAY_COL_W   = 78
+WK_TOTAL_COL_W = 96
+WK_ROW_H       = 30
+WK_HEADER_H    = 34
+WK_WEEK_GAP    = 30
+
 BLOCK_PALETTE = [
     ("#3B82F6", "#1D4ED8"),
     ("#10B981", "#059669"),
@@ -207,6 +217,9 @@ class SummaryView(tk.Frame):
         # {"block_N": {"title": str, "start": dt, "end": dt, "duration_s": int, "is_open": bool}}
         self._block_info: dict = {}
 
+        # Mapa tag → dane wiersza w widoku tygodniowym (hover/klik na nazwę zadania)
+        self._weekly_row_info: dict = {}
+
         self._build_controls()
         self._build_canvas_area()
 
@@ -239,6 +252,21 @@ class SummaryView(tk.Frame):
             state="readonly", width=6,
         ).pack(side="left", padx=(0, 14))
 
+        # ── Checkbox "Widok tygodniowy" — widoczny tylko dla 7 / 14 dni ────
+        self._weekly_var = tk.BooleanVar(value=False)
+        self._weekly_check = tk.Checkbutton(
+            left, text="🗓 Widok tygodniowy",
+            variable=self._weekly_var,
+            bg=C["sidebar"], fg=C["text"],
+            selectcolor=C.get("card", "#1E293B"),
+            activebackground=C["sidebar"], activeforeground=C["text"],
+            font=FONT_SMALL, cursor="hand2",
+            command=self._on_weekly_toggle,
+        )
+        # (pakowany/chowany dynamicznie w _on_days_changed)
+
+        self._days_var.trace_add("write", self._on_days_changed)
+
         self._btn_run = tk.Button(
             left, text="▶ Generuj",
             bg=C["btn_blue"], fg="#fff",
@@ -259,6 +287,31 @@ class SummaryView(tk.Frame):
             tk.Frame(right, bg=color, width=10, height=10).pack(side="left", padx=(0, 3))
             tk.Label(right, text=label, bg=C["sidebar"],
                      fg=C["text_muted"], font=FONT_SMALL).pack(side="left", padx=(0, 10))
+
+        # Ustaw początkową widoczność checkboxa zgodnie z domyślną wartością "Dni wstecz"
+        self._on_days_changed()
+
+    def _on_days_changed(self, *_args) -> None:
+        """Pokazuje/chowa checkbox 'Widok tygodniowy' zależnie od wybranej liczby dni."""
+        try:
+            d = int(self._days_var.get())
+        except ValueError:
+            d = 0
+
+        if d in (7, 14):
+            if not self._weekly_check.winfo_ismapped():
+                # Pakuj tuż przed przyciskiem "Generuj"
+                self._weekly_check.pack(side="left", padx=(0, 14), before=self._btn_run)
+        else:
+            if self._weekly_check.winfo_ismapped():
+                self._weekly_check.pack_forget()
+            if self._weekly_var.get():
+                self._weekly_var.set(False)
+
+    def _on_weekly_toggle(self) -> None:
+        """Przełącza widok bez ponownego pobierania danych, jeśli już je mamy."""
+        if self._task_data:
+            self._draw()
 
     # ── Obszar canvasów ───────────────────────────────────────────────────────
 
@@ -319,8 +372,13 @@ class SummaryView(tk.Frame):
         self._header.xview_moveto(x_frac)
 
     def _on_canvas_configure(self, _event=None) -> None:
+        if self._is_weekly_mode():
+            return
         self._draw_header()
         self._sync_header()
+
+    def _is_weekly_mode(self) -> bool:
+        return bool(self._weekly_var.get()) and self._days in (7, 14)
 
     # ── Nagłówek ─────────────────────────────────────────────────────────────
 
@@ -408,6 +466,7 @@ class SummaryView(tk.Frame):
 
         # Wczytaj lokalne chaty synchronicznie (bez sieci)
         local_results: dict = {}
+        locally_resolved: set = set()
         for t_id, task in local_map.items():
             title = task.get("TITLE") or task.get("title", f"Zadanie #{t_id}")
             msgs = []
@@ -418,6 +477,9 @@ class SummaryView(tk.Frame):
             if chat_id:
                 msgs = self.app.storage.load_chat_messages(chat_id)
             local_results[t_id] = {"title": title, "messages": msgs}
+
+            if detail is not None:
+                locally_resolved.add(t_id)
 
         # Pokaż lokalny wynik natychmiast
         if local_results:
@@ -480,7 +542,7 @@ class SummaryView(tk.Frame):
         merged = {**local_map, **api_map}
 
         # Pobierz chaty tylko dla zadań których nie ma w lokalnych wynikach
-        new_ids = {t_id for t_id in merged if t_id not in local_results}
+        new_ids = {t_id for t_id in merged if t_id not in locally_resolved}
 
         if not new_ids and not local_results:
             self.app.root.after(0, self._on_no_tasks)
@@ -581,9 +643,18 @@ class SummaryView(tk.Frame):
         self._status_var.set(f"{prefix} {len(self._task_data)} zadań, {total_sess} sesji — rysuję…")
         self.app.root.after(30, self._draw)
 
-    # ── Rysowanie ─────────────────────────────────────────────────────────────
+    # ── Rysowanie: dispatcher ────────────────────────────────────────────────
 
     def _draw(self) -> None:
+        """Wybiera widok: oś czasu (godzinowa) albo tabela tygodniowa."""
+        if self._is_weekly_mode():
+            self._draw_weekly()
+        else:
+            self._draw_timeline()
+
+    # ── Rysowanie: oś czasu (widok domyślny) ────────────────────────────────
+
+    def _draw_timeline(self) -> None:
         self._canvas.delete("all")
         self._block_info.clear()
         self._draw_header()
@@ -626,7 +697,7 @@ class SummaryView(tk.Frame):
                                           fill=row_bg, outline="")
 
             is_yesterday = (now.date() - day_dt.date()).days == 1
-            week_days    = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Nd"]
+            week_days    = WEEK_DAY_NAMES
             if is_yesterday:
                 lbl_text = f"Wczoraj\n{day_dt.strftime('%d.%m')}"
                 lbl_fg   = C["text"]
@@ -755,6 +826,179 @@ class SummaryView(tk.Frame):
         )
         self._sync_header()
 
+    # ── Rysowanie: widok tygodniowy (tabela zadanie × dzień) ────────────────
+
+    def _draw_weekly(self) -> None:
+        """
+        Tabela w stylu ClickUp timesheet:
+            Zadanie | Pon | Wt | Śr | Czw | Pt | Sob | Nd | Razem
+        Dla 7 dni  → jedna tabela (bieżący tydzień).
+        Dla 14 dni → dwie tabele (bieżący + poprzedni tydzień).
+        """
+        self._canvas.delete("all")
+        self._block_info.clear()
+        self._weekly_row_info.clear()
+
+        # Nagłówek godzinowy jest nieużywany w tym widoku
+        self._header.delete("all")
+        self._header.configure(scrollregion=(0, 0, 1, AXIS_H))
+
+        now = datetime.now(TZ_LOCAL)
+        this_monday = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                       - timedelta(days=now.weekday()))
+
+        n_weeks = 2 if self._days >= 14 else 1
+        week_starts = [this_monday - timedelta(weeks=i) for i in range(n_weeks)]
+
+        # week_data[w_idx][task_id] = [7 x sekundy], week_totals[w_idx] = [7 x sekundy]
+        week_data: dict[int, dict[str, list[float]]] = {i: {} for i in range(n_weeks)}
+        week_totals: dict[int, list[float]] = {i: [0.0] * 7 for i in range(n_weeks)}
+
+        for t_id, info in self._task_data.items():
+            for s_dt, e_dt, _is_open in info["sessions"]:
+                cur = s_dt
+                while cur < e_dt:
+                    day_start = cur.replace(hour=0, minute=0, second=0, microsecond=0)
+                    day_end   = day_start + timedelta(days=1)
+                    seg_e     = min(e_dt, day_end)
+                    dur       = (seg_e - cur).total_seconds()
+
+                    for w_idx, w_start in enumerate(week_starts):
+                        w_end = w_start + timedelta(days=7)
+                        if w_start <= day_start < w_end:
+                            wd = day_start.weekday()  # 0=Pon .. 6=Nd
+                            bucket = week_data[w_idx].setdefault(t_id, [0.0] * 7)
+                            bucket[wd] += dur
+                            week_totals[w_idx][wd] += dur
+                            break
+
+                    cur = seg_e
+
+        canvas_w = 20 + WK_TASK_COL_W + 7 * WK_DAY_COL_W + WK_TOTAL_COL_W + 20
+        x0 = 10
+        y  = 14
+
+        for w_idx in range(n_weeks):
+            w_start = week_starts[w_idx]
+            w_end   = w_start + timedelta(days=6)
+            label   = "Bieżący tydzień" if w_idx == 0 else "Poprzedni tydzień"
+            date_range = f"{w_start.strftime('%d.%m')} – {w_end.strftime('%d.%m.%Y')}"
+
+            self._canvas.create_text(
+                x0, y, text=f"{label}   ({date_range})", anchor="w",
+                fill=C["accent"], font=("Segoe UI Semibold", 10),
+            )
+            y += 24
+
+            # ── Nagłówek tabeli ─────────────────────────────────────────
+            hy0, hy1 = y, y + WK_HEADER_H
+            self._canvas.create_rectangle(x0, hy0, x0 + canvas_w - 20, hy1,
+                                          fill=C["sidebar"], outline="")
+            self._canvas.create_text(x0 + 10, (hy0 + hy1) // 2, text="Zadanie",
+                                     anchor="w", fill=C["text_muted"],
+                                     font=("Segoe UI", 8, "bold"))
+            cx = x0 + WK_TASK_COL_W
+            for wd_name in WEEK_DAY_NAMES:
+                self._canvas.create_text(cx + WK_DAY_COL_W // 2, (hy0 + hy1) // 2,
+                                         text=wd_name, fill=C["text_muted"],
+                                         font=("Segoe UI", 8, "bold"))
+                cx += WK_DAY_COL_W
+            self._canvas.create_text(cx + WK_TOTAL_COL_W // 2, (hy0 + hy1) // 2,
+                                     text="Razem", fill=C["accent"],
+                                     font=("Segoe UI", 8, "bold"))
+            self._canvas.create_line(x0, hy1, x0 + canvas_w - 20, hy1,
+                                     fill=C.get("card_border", "#334155"))
+            y = hy1
+
+            # ── Wiersze zadań (tylko te z czasem w danym tygodniu) ──────
+            tasks_this_week = [
+                (t_id, self._task_data[t_id]["title"], hours)
+                for t_id, hours in week_data[w_idx].items()
+                if any(h > 0 for h in hours)
+            ]
+            tasks_this_week.sort(key=lambda item: -sum(item[2]))
+
+            if not tasks_this_week:
+                ry0, ry1 = y, y + WK_ROW_H
+                self._canvas.create_text(x0 + 10, (ry0 + ry1) // 2,
+                                         text="Brak danych w tym tygodniu",
+                                         anchor="w", fill=C["text_muted"], font=FONT_SMALL)
+                y = ry1
+            else:
+                for row_i, (t_id, title, hours) in enumerate(tasks_this_week):
+                    ry0, ry1 = y, y + WK_ROW_H
+                    row_bg = C["card"] if row_i % 2 == 0 else C.get("card_hover", C["sidebar"])
+
+                    row_tag = f"wkrow_{w_idx}_{t_id}"
+
+                    self._canvas.create_rectangle(x0, ry0, x0 + canvas_w - 20, ry1,
+                                                  fill=row_bg, outline="",
+                                                  tags=(row_tag,))
+
+                    short = title if len(title) <= 26 else title[:24] + "…"
+                    self._canvas.create_text(x0 + 10, (ry0 + ry1) // 2, text=short,
+                                             anchor="w", fill=C["text"], font=FONT_SMALL,
+                                             tags=(row_tag,))
+
+                    cx = x0 + WK_TASK_COL_W
+                    for h_secs in hours:
+                        if h_secs > 0:
+                            txt, fg, fnt = seconds_to_readable(int(h_secs)), C["text"], FONT_MONO
+                        else:
+                            txt, fg, fnt = "—", C.get("text_disabled", C["text_muted"]), FONT_SMALL
+                        self._canvas.create_text(cx + WK_DAY_COL_W // 2, (ry0 + ry1) // 2,
+                                                 text=txt, fill=fg, font=fnt,
+                                                 tags=(row_tag,))
+                        cx += WK_DAY_COL_W
+
+                    row_total = sum(hours)
+                    self._canvas.create_text(cx + WK_TOTAL_COL_W // 2, (ry0 + ry1) // 2,
+                                             text=seconds_to_readable(int(row_total)),
+                                             fill=C["accent"], font=("Segoe UI Semibold", 8),
+                                             tags=(row_tag,))
+
+                    self._weekly_row_info[row_tag] = {
+                        "title":      title,
+                        "task_id":    t_id,
+                        "week_label": label,
+                        "date_range": date_range,
+                        "hours":      hours,
+                        "total_s":    row_total,
+                    }
+                    self._bind_weekly_row(row_tag)
+
+                    y = ry1
+
+                # ── Wiersz sum ───────────────────────────────────────────
+                ry0, ry1 = y, y + WK_ROW_H
+                self._canvas.create_rectangle(x0, ry0, x0 + canvas_w - 20, ry1,
+                                              fill=C.get("card_border", "#334155"), outline="")
+                self._canvas.create_text(x0 + 10, (ry0 + ry1) // 2, text="Razem",
+                                         anchor="w", fill=C["text"],
+                                         font=("Segoe UI Semibold", 8))
+                cx = x0 + WK_TASK_COL_W
+                grand_total = 0.0
+                for d_secs in week_totals[w_idx]:
+                    grand_total += d_secs
+                    txt = seconds_to_readable(int(d_secs)) if d_secs > 0 else "—"
+                    self._canvas.create_text(cx + WK_DAY_COL_W // 2, (ry0 + ry1) // 2,
+                                             text=txt, fill=C["text"],
+                                             font=("Segoe UI", 8, "bold"))
+                    cx += WK_DAY_COL_W
+                self._canvas.create_text(cx + WK_TOTAL_COL_W // 2, (ry0 + ry1) // 2,
+                                         text=seconds_to_readable(int(grand_total)),
+                                         fill=C["accent"], font=("Segoe UI Semibold", 9))
+                y = ry1
+
+            y += WK_WEEK_GAP
+
+        final_h = y + 20
+        self._canvas.configure(scrollregion=(0, 0, canvas_w, final_h))
+
+        self._status_var.set(
+            f"✓ Widok tygodniowy — {len(self._task_data)} zadań"
+        )
+
     # ── Hover / klik na bloku ─────────────────────────────────────────────────
 
     def _bind_block(self, tag: str) -> None:
@@ -873,5 +1117,126 @@ class SummaryView(tk.Frame):
         popup.wm_geometry(f"+{px}+{py}")
 
         # Zamknij kliknięciem gdziekolwiek poza popupem
+        popup.bind("<FocusOut>", lambda e: popup.destroy())
+        popup.focus_set()
+
+    # ── Hover / klik na wierszu w widoku tygodniowym ─────────────────────────
+
+    def _bind_weekly_row(self, tag: str) -> None:
+        """Binduje tooltip (nazwa zadania) i popup ze szczegółami do wiersza tabeli tygodniowej."""
+
+        def _row_rect_id() -> int | None:
+            for item in self._canvas.find_withtag(tag):
+                if self._canvas.type(item) == "rectangle":
+                    return item
+            return None
+
+        def _enter(event, t=tag) -> None:
+            info = self._weekly_row_info.get(t)
+            if not info:
+                return
+            rid = _row_rect_id()
+            if rid:
+                self._canvas.itemconfig(rid, outline="#FFFFFF", width=1)
+            self._tooltip.show(info["title"], event.x_root, event.y_root)
+
+        def _leave(event, t=tag) -> None:
+            rid = _row_rect_id()
+            if rid:
+                self._canvas.itemconfig(rid, outline="", width=0)
+            self._tooltip.hide()
+
+        def _click(event, t=tag) -> None:
+            self._tooltip.hide()
+            info = self._weekly_row_info.get(t)
+            if not info:
+                return
+            self._show_weekly_row_popup(info, event.x_root, event.y_root)
+
+        self._canvas.tag_bind(tag, "<Enter>", _enter)
+        self._canvas.tag_bind(tag, "<Leave>", _leave)
+        self._canvas.tag_bind(tag, "<Button-1>", _click)
+
+    def _show_weekly_row_popup(self, info: dict, x_root: int, y_root: int) -> None:
+        """Wyświetla okienko ze szczegółami zadania w widoku tygodniowym (rozbicie dzień po dniu)."""
+        popup = tk.Toplevel(self._canvas)
+        popup.wm_overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.configure(bg=C.get("card_border", "#334155"))
+
+        inner = tk.Frame(popup, bg=C["card"], padx=14, pady=10)
+        inner.pack(padx=1, pady=1)
+
+        # Tytuł
+        tk.Label(inner, text=info["title"],
+                 bg=C["card"], fg=C["accent"],
+                 font=("Segoe UI Semibold", 10),
+                 wraplength=300, justify="left").pack(anchor="w")
+
+        tk.Label(inner, text=f"{info['week_label']}  ({info['date_range']})",
+                 bg=C["card"], fg=C["text_muted"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+
+        tk.Frame(inner, bg=C.get("card_border", "#334155"), height=1).pack(fill="x", pady=6)
+
+        # Rozbicie dzień po dniu
+        for wd_name, h_secs in zip(WEEK_DAY_NAMES, info["hours"]):
+            row = tk.Frame(inner, bg=C["card"])
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=wd_name, bg=C["card"], fg=C["text_muted"],
+                     font=("Segoe UI", 8), width=6, anchor="w").pack(side="left")
+            val = seconds_to_readable(int(h_secs)) if h_secs > 0 else "—"
+            fg  = C["text"] if h_secs > 0 else C.get("text_disabled", C["text_muted"])
+            tk.Label(row, text=val, bg=C["card"], fg=fg,
+                     font=("Segoe UI", 8)).pack(side="left")
+
+        tk.Frame(inner, bg=C.get("card_border", "#334155"), height=1).pack(fill="x", pady=6)
+
+        total_row = tk.Frame(inner, bg=C["card"])
+        total_row.pack(fill="x")
+        tk.Label(total_row, text="⏱ Razem:", bg=C["card"], fg=C["text_muted"],
+                 font=("Segoe UI", 8), width=10, anchor="w").pack(side="left")
+        tk.Label(total_row, text=seconds_to_readable(int(info["total_s"])),
+                 bg=C["card"], fg=C["accent"],
+                 font=("Segoe UI Semibold", 9)).pack(side="left")
+
+        tk.Frame(inner, bg=C.get("card_border", "#334155"), height=1).pack(fill="x", pady=6)
+
+        btn_row = tk.Frame(inner, bg=C["card"])
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        task_id = info.get("task_id")
+        if task_id:
+            def _open_task(tid=task_id, p=popup):
+                p.destroy()
+                self.app._open_task_direct(str(tid))
+
+            tk.Button(
+                btn_row, text="↗ Otwórz zadanie",
+                bg=C["accent"], fg="#fff",
+                font=("Segoe UI", 8), relief="flat", cursor="hand2",
+                padx=10, pady=3,
+                activebackground=C.get("accent2", C["accent"]), activeforeground="#fff",
+                command=_open_task,
+            ).pack(side="left")
+
+        tk.Button(
+            btn_row, text="✕ Zamknij",
+            bg=C["sidebar"], fg=C["text_muted"],
+            font=("Segoe UI", 8), relief="flat", cursor="hand2",
+            padx=8, pady=3,
+            command=popup.destroy,
+        ).pack(side="right")
+
+        # Pozycja — żeby nie wychodziło poza ekran
+        popup.update_idletasks()
+        pw = popup.winfo_reqwidth()
+        ph = popup.winfo_reqheight()
+        sw = popup.winfo_screenwidth()
+        sh = popup.winfo_screenheight()
+        px = min(x_root + 10, sw - pw - 10)
+        py = min(y_root + 10, sh - ph - 10)
+        popup.wm_geometry(f"+{px}+{py}")
+
         popup.bind("<FocusOut>", lambda e: popup.destroy())
         popup.focus_set()
